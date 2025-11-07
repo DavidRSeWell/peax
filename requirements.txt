@@ -1,0 +1,6 @@
+jax>=0.4.20
+jaxlib>=0.4.20
+numpy>=1.24.0
+chex>=0.1.8
+flax>=0.7.0
+gymnasium>=0.29.0

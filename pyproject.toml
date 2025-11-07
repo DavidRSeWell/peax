@@ -1,0 +1,30 @@
+[project]
+name = "peax"
+version = "0.1.0"
+description = "Pursuer-Evader Environment for Reinforcement Learning in JAX"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.4.20",
+    "jaxlib>=0.4.20",
+    "numpy>=1.24.0",
+    "chex>=0.1.8",
+    "gymnasium>=0.29.0",
+    "equinox>=0.13.2",
+    "optax>=0.2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+examples = [
+    "equinox>=0.11.0",
+    "optax>=0.1.7",
+    "matplotlib>=3.7.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
