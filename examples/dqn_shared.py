@@ -170,6 +170,7 @@ def discretize_action(action_idx: int, num_actions_per_dim: int, max_force: floa
     return jnp.array([fx, fy])
 
 
+@eqx.filter_jit
 def select_action(
     q_network: QNetwork,
     obs: jax.Array,
@@ -377,18 +378,18 @@ def train_dqn_shared(
         episode_length = 0
 
         for step in range(max_steps_per_episode):
-            # Get observations for both agents
+            # Get observations for both agents (keep as JAX arrays)
             pursuer_obs = obs_dict["pursuer"]
             evader_obs = obs_dict["evader"]
-            pursuer_obs_array = np.array(observation_to_array(pursuer_obs))
-            evader_obs_array = np.array(observation_to_array(evader_obs))
+            pursuer_obs_array = observation_to_array(pursuer_obs)
+            evader_obs_array = observation_to_array(evader_obs)
 
             # Both agents use the SAME network to select actions
             key, pursuer_key, evader_key = jax.random.split(key, 3)
 
             pursuer_action_idx = int(select_action(
                 q_network,  # Same network
-                jnp.array(pursuer_obs_array),
+                pursuer_obs_array,
                 epsilon,
                 num_actions,
                 pursuer_key
@@ -397,7 +398,7 @@ def train_dqn_shared(
 
             evader_action_idx = int(select_action(
                 q_network,  # Same network
-                jnp.array(evader_obs_array),
+                evader_obs_array,
                 epsilon,
                 num_actions,
                 evader_key
@@ -408,25 +409,25 @@ def train_dqn_shared(
             actions = {"pursuer": pursuer_force, "evader": evader_force}
             next_state, next_obs_dict, rewards, done, info = env.step(state, actions)
 
-            # Store transitions for BOTH agents in the same buffer
-            next_pursuer_obs_array = np.array(observation_to_array(next_obs_dict["pursuer"]))
-            next_evader_obs_array = np.array(observation_to_array(next_obs_dict["evader"]))
+            # Store transitions for BOTH agents in the same buffer (convert to numpy only for storage)
+            next_pursuer_obs_array = observation_to_array(next_obs_dict["pursuer"])
+            next_evader_obs_array = observation_to_array(next_obs_dict["evader"])
 
-            # Add pursuer's experience
+            # Add pursuer's experience (convert to numpy for storage)
             replay_buffer.add(
-                pursuer_obs_array,
+                np.array(pursuer_obs_array),
                 pursuer_action_idx,
                 rewards["pursuer"],
-                next_pursuer_obs_array,
+                np.array(next_pursuer_obs_array),
                 done
             )
 
-            # Add evader's experience
+            # Add evader's experience (convert to numpy for storage)
             replay_buffer.add(
-                evader_obs_array,
+                np.array(evader_obs_array),
                 evader_action_idx,
                 rewards["evader"],
-                next_evader_obs_array,
+                np.array(next_evader_obs_array),
                 done
             )
 
