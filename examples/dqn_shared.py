@@ -21,9 +21,10 @@ from typing import NamedTuple, Tuple, Dict
 
 
 class ReplayBuffer:
-    """Experience replay buffer for DQN.
+    """Experience replay buffer for DQN using JAX arrays.
 
     Stores transitions and samples random batches for training.
+    Uses JAX arrays to avoid CPU synchronization and enable GPU storage.
     """
 
     def __init__(self, capacity: int, obs_dim: int, action_dim: int):
@@ -38,36 +39,53 @@ class ReplayBuffer:
         self.obs_dim = obs_dim
         self.action_dim = action_dim
 
-        # Pre-allocate arrays
-        self.observations = np.zeros((capacity, obs_dim), dtype=np.float32)
-        self.actions = np.zeros((capacity,), dtype=np.int32)
-        self.rewards = np.zeros((capacity,), dtype=np.float32)
-        self.next_observations = np.zeros((capacity, obs_dim), dtype=np.float32)
-        self.dones = np.zeros((capacity,), dtype=np.bool_)
+        # Pre-allocate JAX arrays (will stay on GPU if available)
+        self.observations = jnp.zeros((capacity, obs_dim), dtype=jnp.float32)
+        self.actions = jnp.zeros((capacity,), dtype=jnp.int32)
+        self.rewards = jnp.zeros((capacity,), dtype=jnp.float32)
+        self.next_observations = jnp.zeros((capacity, obs_dim), dtype=jnp.float32)
+        self.dones = jnp.zeros((capacity,), dtype=jnp.bool_)
 
         self.size = 0
         self.position = 0
 
     def add(
         self,
-        obs: np.ndarray,
+        obs: jax.Array,
         action: int,
         reward: float,
-        next_obs: np.ndarray,
+        next_obs: jax.Array,
         done: bool
     ):
-        """Add a transition to the buffer."""
-        self.observations[self.position] = obs
-        self.actions[self.position] = action
-        self.rewards[self.position] = reward
-        self.next_observations[self.position] = next_obs
-        self.dones[self.position] = done
+        """Add a transition to the buffer.
+
+        Args:
+            obs: Observation (JAX array)
+            action: Action index
+            reward: Reward value
+            next_obs: Next observation (JAX array)
+            done: Done flag
+        """
+        # Update arrays in-place using JAX's at[] syntax
+        self.observations = self.observations.at[self.position].set(obs)
+        self.actions = self.actions.at[self.position].set(action)
+        self.rewards = self.rewards.at[self.position].set(reward)
+        self.next_observations = self.next_observations.at[self.position].set(next_obs)
+        self.dones = self.dones.at[self.position].set(done)
 
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size: int, key: jax.Array):
-        """Sample a random batch of transitions."""
+        """Sample a random batch of transitions.
+
+        Args:
+            batch_size: Number of transitions to sample
+            key: JAX random key
+
+        Returns:
+            Tuple of (observations, actions, rewards, next_observations, dones)
+        """
         indices = jax.random.choice(
             key,
             self.size,
@@ -76,11 +94,11 @@ class ReplayBuffer:
         )
 
         return (
-            jnp.array(self.observations[indices]),
-            jnp.array(self.actions[indices]),
-            jnp.array(self.rewards[indices]),
-            jnp.array(self.next_observations[indices]),
-            jnp.array(self.dones[indices]),
+            self.observations[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_observations[indices],
+            self.dones[indices],
         )
 
     def __len__(self):
@@ -409,25 +427,25 @@ def train_dqn_shared(
             actions = {"pursuer": pursuer_force, "evader": evader_force}
             next_state, next_obs_dict, rewards, done, info = env.step(state, actions)
 
-            # Store transitions for BOTH agents in the same buffer (convert to numpy only for storage)
+            # Get next observations for BOTH agents (keep as JAX arrays)
             next_pursuer_obs_array = observation_to_array(next_obs_dict["pursuer"])
             next_evader_obs_array = observation_to_array(next_obs_dict["evader"])
 
-            # Add pursuer's experience (convert to numpy for storage)
+            # Add pursuer's experience (no conversion needed - stays as JAX arrays)
             replay_buffer.add(
-                np.array(pursuer_obs_array),
+                pursuer_obs_array,
                 pursuer_action_idx,
                 rewards["pursuer"],
-                np.array(next_pursuer_obs_array),
+                next_pursuer_obs_array,
                 done
             )
 
-            # Add evader's experience (convert to numpy for storage)
+            # Add evader's experience (no conversion needed - stays as JAX arrays)
             replay_buffer.add(
-                np.array(evader_obs_array),
+                evader_obs_array,
                 evader_action_idx,
                 rewards["evader"],
-                np.array(next_evader_obs_array),
+                next_evader_obs_array,
                 done
             )
 
