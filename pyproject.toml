@@ -12,6 +12,7 @@ dependencies = [
     "gymnasium>=0.29.0",
     "equinox>=0.13.2",
     "optax>=0.2.6",
+    "tqdm>=4.67.1",
 ]
 
 [project.optional-dependencies]

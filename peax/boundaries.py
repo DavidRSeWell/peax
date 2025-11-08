@@ -1,8 +1,9 @@
 """Boundary geometry definitions for the environment."""
 
 from typing import Protocol
-import jax.numpy as jnp
 from chex import Array
+
+import jax.numpy as jnp
 import jax
 
 
@@ -53,6 +54,7 @@ class SquareBoundary:
             size: Side length of the square
         """
         self.size = size
+        self.max_dist = jnp.sqrt(self.size**2 + self.size**2)
         self.half_size = size / 2.0
 
     def contains(self, position: Array) -> Array:
@@ -86,6 +88,7 @@ class TriangleBoundary:
             size: Side length of the equilateral triangle
         """
         self.size = size
+        self.max_dist = jnp.sqrt(self.size**2 + self.size**2)
         # Calculate vertices of equilateral triangle centered at origin
         # Height of equilateral triangle: h = (sqrt(3)/2) * side
         height = (jnp.sqrt(3.0) / 2.0) * size
@@ -174,6 +177,7 @@ class CircleBoundary:
             radius: Radius of the circle
         """
         self.radius = radius
+        self.max_dist = 2*radius
 
     def contains(self, position: Array) -> Array:
         """Check if position is within circle."""

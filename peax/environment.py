@@ -220,15 +220,19 @@ class PursuerEvaderEnv:
         Returns:
             Dictionary with rewards for "pursuer" and "evader"
         """
+        dist_ = jnp.linalg.norm(state.pursuer.position - state.evader.position)
+
+        r_immediate = dist_ / self.boundary.max_dist
+
         # Sparse rewards: only at episode end
         pursuer_reward = jnp.where(
             captured,
             1.0,  # Pursuer wins
             jnp.where(timeout, -1.0, 0.0)  # Evader wins or game continues
-        )
+        )*self.boundary.max_dist + -r_immediate
 
         # Zero-sum: evader reward is negative of pursuer reward
-        evader_reward = -pursuer_reward
+        evader_reward = -pursuer_reward 
 
         return {
             "pursuer": float(pursuer_reward),

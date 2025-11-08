@@ -12,11 +12,12 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
-from typing import NamedTuple, Tuple, Dict
-from collections import deque
 import numpy as np
 
+from collections import deque
 from peax import PursuerEvaderEnv, EnvState, Observation
+from tqdm import tqdm
+from typing import NamedTuple, Tuple, Dict
 
 
 class ReplayBuffer:
@@ -367,7 +368,7 @@ def train_dqn_shared(
     print(f"Network: SHARED (both agents use same network)")
     print("=" * 60)
 
-    for episode in range(num_episodes):
+    for episode in tqdm(range(num_episodes)):
         key, reset_key = jax.random.split(key)
         state, obs_dict = env.reset(reset_key)
 
