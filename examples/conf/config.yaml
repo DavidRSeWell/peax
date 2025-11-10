@@ -1,0 +1,30 @@
+# Default configuration for CleanRL DQN training
+# Override values via command line: python examples/cleanrl_dqn.py learning_rate=1e-4
+
+# Experiment settings
+exp_name: cleanrl_dqn_peax
+seed: 1
+
+# Algorithm hyperparameters
+total_timesteps: 500000
+learning_rate: 2.5e-4
+buffer_size: 10000
+gamma: 0.99
+tau: 1.0
+target_network_frequency: 500
+batch_size: 128
+
+# Exploration settings
+start_e: 1.0
+end_e: 0.05
+exploration_fraction: 0.5
+learning_starts: 10000
+train_frequency: 10
+eval_every: 10000
+
+# Environment settings
+boundary_type: square  # Options: square, circle, triangle
+boundary_size: 10.0
+max_steps: 200
+capture_radius: 0.5
+num_actions_per_dim: 5  # Total actions = this^2 (e.g., 5x5 = 25 actions)

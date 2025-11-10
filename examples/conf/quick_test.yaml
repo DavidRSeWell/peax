@@ -1,0 +1,13 @@
+# Quick test configuration (faster training for debugging)
+# Run with: python cleanrl_dqn.py --config-name=quick_test
+
+defaults:
+  - config
+  - _self_
+
+exp_name: cleanrl_dqn_quick_test
+total_timesteps: 10000
+learning_starts: 1000
+buffer_size: 5000
+batch_size: 64
+train_frequency: 5

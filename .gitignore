@@ -4,7 +4,12 @@ __pycache__/
 build/
 dist/
 wheels/
+outputs/
+runs/
+
 *.egg-info
+*.gif
+*.pkl
 
 # Virtual environments
 .venv

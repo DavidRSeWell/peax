@@ -1,0 +1,12 @@
+# Fine-grained control configuration (more discrete actions)
+# Run with: python cleanrl_dqn.py --config-name=fine_control
+
+defaults:
+  - config
+  - _self_
+
+exp_name: cleanrl_dqn_fine_control
+num_actions_per_dim: 7  # 7x7 = 49 actions (finer control)
+total_timesteps: 750000  # More timesteps due to larger action space
+learning_rate: 1e-4  # Lower learning rate for stability
+batch_size: 256  # Larger batches
