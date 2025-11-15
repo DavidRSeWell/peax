@@ -13,6 +13,7 @@ dependencies = [
     "equinox>=0.13.2",
     "optax>=0.2.6",
     "tqdm>=4.67.1",
+    "streamlit>=1.51.0",
 ]
 
 [project.optional-dependencies]
@@ -30,8 +31,12 @@ examples = [
     "pillow>=10.0.0",
     "flashbax>=0.1.0",
     "tqdm>=4.65.0",
+    "streamlit>=1.28.0",
 ]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["peax"]

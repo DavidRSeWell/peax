@@ -49,6 +49,7 @@ class PursuerEvaderEnv:
             evader_mass: Mass of evader agent
             max_force: Maximum force magnitude
         """
+        self.boundary_type = boundary_type
         self.boundary = create_boundary(boundary_type, boundary_size)
         self.params = EnvParams(
             max_steps=max_steps,
@@ -207,10 +208,10 @@ class PursuerEvaderEnv:
     ) -> Dict[str, float]:
         """Compute rewards for both agents.
 
-        This is a zero-sum game:
-        - Pursuer gets +1 for capture, -1 for timeout
-        - Evader gets -1 for capture, +1 for timeout
-        - Otherwise, sparse reward of 0
+        This is a zero-sum game with shaped rewards:
+        - Terminal: Pursuer gets +1 for capture, -1 for timeout
+        - Immediate: Distance-based shaping (±0.005 per step)
+        - Cumulative shaping over 200 steps ≈ ±1.0, so terminal rewards dominate
 
         Args:
             state: Current environment state
@@ -220,19 +221,25 @@ class PursuerEvaderEnv:
         Returns:
             Dictionary with rewards for "pursuer" and "evader"
         """
-        dist_ = jnp.linalg.norm(state.pursuer.position - state.evader.position)
+        # Normalize distance to [0, 1]
+        dist = jnp.linalg.norm(state.pursuer.position - state.evader.position)
+        normalized_dist = dist / self.boundary.max_dist
 
-        r_immediate = dist_ / self.boundary.max_dist
+        # Small immediate reward scaled to not dominate terminal reward
+        # 0.005 * 200 steps = 1.0 max cumulative, matching terminal reward magnitude
+        distance_reward = -0.005 * normalized_dist  # Pursuer wants to minimize distance
 
-        # Sparse rewards: only at episode end
-        pursuer_reward = jnp.where(
+        # Terminal rewards
+        terminal_reward = jnp.where(
             captured,
-            1.0,  # Pursuer wins
+            1.0,      # Pursuer wins
             jnp.where(timeout, -1.0, 0.0)  # Evader wins or game continues
-        )*self.boundary.max_dist + -r_immediate
+        )
+
+        pursuer_reward = terminal_reward + distance_reward
 
         # Zero-sum: evader reward is negative of pursuer reward
-        evader_reward = -pursuer_reward 
+        evader_reward = -pursuer_reward
 
         return {
             "pursuer": float(pursuer_reward),

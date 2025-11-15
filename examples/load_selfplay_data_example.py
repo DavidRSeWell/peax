@@ -188,30 +188,32 @@ def main():
     pursuer_batch = filter_by_agent(batch, agent_id=0)
     evader_batch = filter_by_agent(batch, agent_id=1)
 
+    
+
     print("\n" + "=" * 70)
     print("Usage in Training Loop")
     print("=" * 70)
     print("""
-# In your training loop:
-for step in range(num_training_steps):
-    # Sample batch from buffer
-    key, sample_key = jax.random.split(key)
-    batch = buffer.sample(buffer_state, sample_key)
+        # In your training loop:
+    for step in range(num_training_steps):
+        # Sample batch from buffer
+        key, sample_key = jax.random.split(key)
+        batch = buffer.sample(buffer_state, sample_key)
 
-    # Get experience data
-    experience = batch.experience
+        # Get experience data
+        experience = batch.experience
 
-    # Optional: filter by agent
-    mask = experience['agent_id'] == 0  # pursuer only
-    obs = experience['observation'][mask]
-    actions = experience['action'][mask]
-    rewards = experience['reward'][mask]
-    next_obs = experience['next_observation'][mask]
-    dones = experience['done'][mask]
+        # Optional: filter by agent
+        mask = experience['agent_id'] == 0  # pursuer only
+        obs = experience['observation'][mask]
+        actions = experience['action'][mask]
+        rewards = experience['reward'][mask]
+        next_obs = experience['next_observation'][mask]
+        dones = experience['done'][mask]
 
-    # Use for training...
-    loss = train_step(obs, actions, rewards, next_obs, dones)
-    """)
+        # Use for training...
+        loss = train_step(obs, actions, rewards, next_obs, dones)
+        """)
 
 
 if __name__ == "__main__":

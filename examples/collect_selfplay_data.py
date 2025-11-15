@@ -130,7 +130,7 @@ def run_selfplay_episode(
         next_observations.append(next_pursuer_obs)
         dones_list.append(done)
         agent_ids.append(0)
-
+        
         # Store evader transition
         observations.append(evader_obs)
         actions.append(evader_action_idx)
