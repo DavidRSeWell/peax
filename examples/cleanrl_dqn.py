@@ -1,6 +1,10 @@
-"""CleanRL-style DQN implementation for PursuerEvaderEnv.
+"""CleanRL-style DQN implementation with self-play for PursuerEvaderEnv.
 
-This adapts the CleanRL JAX DQN implementation to work with the PEAX environment.
+This adapts the CleanRL JAX DQN implementation to work with the PEAX environment
+using self-play. A single Q-network is trained to play optimally from both the
+pursuer and evader perspectives. Both agents use the same network and both agents'
+experiences contribute to training.
+
 Based on: https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/dqn_jax.py
 """
 
@@ -218,14 +222,11 @@ def render_episode_to_gif(
         action = int(jnp.argmax(q_values))
         pursuer_force = discretize_action(action, num_actions_per_dim, env.params.max_force)
 
-        # Random evader
-        key, evader_key = jax.random.split(key)
-        evader_force = jax.random.uniform(
-            evader_key,
-            shape=(2,),
-            minval=-env.params.max_force,
-            maxval=env.params.max_force
-        )
+        # Greedy action for evader
+        evader_obs = observation_to_array(obs_dict["evader"])
+        q_values_evader = q_network.apply(q_state.params, evader_obs)
+        action_evader = int(jnp.argmax(q_values_evader))
+        evader_force = discretize_action(action_evader, num_actions_per_dim, env.params.max_force)
 
         # Step environment
         actions = {"pursuer": pursuer_force, "evader": evader_force}
@@ -354,8 +355,9 @@ def main(cfg: DQNConfig) -> None:
     num_actions = cfg.num_actions_per_dim ** 2
 
     print("=" * 70)
-    print(f"CleanRL DQN Training on PursuerEvaderEnv")
+    print(f"CleanRL DQN Self-Play Training on PursuerEvaderEnv")
     print("=" * 70)
+    print(f"Training mode: Self-play (single network for both agents)")
     print(f"Observation dimension: {obs_dim}")
     print(f"Number of discrete actions: {num_actions} ({cfg.num_actions_per_dim}x{cfg.num_actions_per_dim} grid)")
     print(f"Total timesteps: {cfg.total_timesteps}")
@@ -418,7 +420,8 @@ def main(cfg: DQNConfig) -> None:
     # Training loop
     key, reset_key = jax.random.split(key)
     env_state, obs_dict = env.reset(reset_key)
-    obs = observation_to_array(obs_dict["pursuer"])
+    pursuer_obs = observation_to_array(obs_dict["pursuer"])
+    evader_obs = observation_to_array(obs_dict["evader"])
 
     episode_rewards = []
     episode_lengths = []
@@ -437,40 +440,43 @@ def main(cfg: DQNConfig) -> None:
             global_step,
         )
 
-        # Select action
+        # Select action for pursuer
         if random.random() < epsilon:
-            action = random.randint(0, num_actions - 1)
+            pursuer_action = random.randint(0, num_actions - 1)
         else:
-            q_values = q_network.apply(q_state.params, obs)
-            action = int(jnp.argmax(q_values))
+            q_values = q_network.apply(q_state.params, pursuer_obs)
+            pursuer_action = int(jnp.argmax(q_values))
 
-        # Convert discrete action to continuous force
-        pursuer_force = discretize_action(action, cfg.num_actions_per_dim, env.params.max_force)
+        # Select action for evader (using same Q-network)
+        if random.random() < epsilon:
+            evader_action = random.randint(0, num_actions - 1)
+        else:
+            q_values_evader = q_network.apply(q_state.params, evader_obs)
+            evader_action = int(jnp.argmax(q_values_evader))
 
-        # Random evader action
-        key, evader_key = jax.random.split(key)
-        evader_force = jax.random.uniform(
-            evader_key,
-            shape=(2,),
-            minval=-env.params.max_force,
-            maxval=env.params.max_force
-        )
+        # Convert discrete actions to continuous forces
+        pursuer_force = discretize_action(pursuer_action, cfg.num_actions_per_dim, env.params.max_force)
+        evader_force = discretize_action(evader_action, cfg.num_actions_per_dim, env.params.max_force)
 
         # Step environment
         actions = {"pursuer": pursuer_force, "evader": evader_force}
         next_env_state, next_obs_dict, rewards, done, info = env.step(env_state, actions)
 
-        next_obs = observation_to_array(next_obs_dict["pursuer"])
-        reward = rewards["pursuer"]
+        next_pursuer_obs = observation_to_array(next_obs_dict["pursuer"])
+        next_evader_obs = observation_to_array(next_obs_dict["evader"])
+        pursuer_reward = rewards["pursuer"]
+        evader_reward = rewards["evader"]
 
-        # Store in replay buffer
-        rb.add(obs, next_obs, action, reward, done)
+        # Store both agents' experiences in replay buffer
+        rb.add(pursuer_obs, next_pursuer_obs, pursuer_action, pursuer_reward, done)
+        rb.add(evader_obs, next_evader_obs, evader_action, evader_reward, done)
 
         # Update state
-        obs = next_obs
+        pursuer_obs = next_pursuer_obs
+        evader_obs = next_evader_obs
         env_state = next_env_state
 
-        episode_reward += reward
+        episode_reward += pursuer_reward
         episode_length += 1
 
         # Handle episode termination
@@ -496,7 +502,8 @@ def main(cfg: DQNConfig) -> None:
             # Reset environment
             key, reset_key = jax.random.split(key)
             env_state, obs_dict = env.reset(reset_key)
-            obs = observation_to_array(obs_dict["pursuer"])
+            pursuer_obs = observation_to_array(obs_dict["pursuer"])
+            evader_obs = observation_to_array(obs_dict["evader"])
             episode_reward = 0.0
             episode_length = 0
 
@@ -540,26 +547,26 @@ def main(cfg: DQNConfig) -> None:
             for eval_ep in range(eval_episodes):
                 key, eval_key = jax.random.split(key)
                 eval_state, eval_obs_dict = env.reset(eval_key)
-                eval_obs = observation_to_array(eval_obs_dict["pursuer"])
+                eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"])
+                eval_evader_obs = observation_to_array(eval_obs_dict["evader"])
                 eval_reward = 0.0
 
                 for eval_step in range(cfg.max_steps):
-                    q_values = q_network.apply(q_state.params, eval_obs)
-                    eval_action = int(jnp.argmax(q_values))
-                    eval_pursuer_force = discretize_action(eval_action, cfg.num_actions_per_dim, env.params.max_force)
+                    # Greedy action for pursuer
+                    q_values = q_network.apply(q_state.params, eval_pursuer_obs)
+                    eval_pursuer_action = int(jnp.argmax(q_values))
+                    eval_pursuer_force = discretize_action(eval_pursuer_action, cfg.num_actions_per_dim, env.params.max_force)
 
-                    key, eval_evader_key = jax.random.split(key)
-                    eval_evader_force = jax.random.uniform(
-                        eval_evader_key,
-                        shape=(2,),
-                        minval=-env.params.max_force,
-                        maxval=env.params.max_force
-                    )
+                    # Greedy action for evader
+                    q_values_evader = q_network.apply(q_state.params, eval_evader_obs)
+                    eval_evader_action = int(jnp.argmax(q_values_evader))
+                    eval_evader_force = discretize_action(eval_evader_action, cfg.num_actions_per_dim, env.params.max_force)
 
                     eval_actions = {"pursuer": eval_pursuer_force, "evader": eval_evader_force}
                     eval_state, eval_obs_dict, eval_rewards_dict, eval_done, eval_info = env.step(eval_state, eval_actions)
 
-                    eval_obs = observation_to_array(eval_obs_dict["pursuer"])
+                    eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"])
+                    eval_evader_obs = observation_to_array(eval_obs_dict["evader"])
                     eval_reward += eval_rewards_dict["pursuer"]
 
                     if eval_done:
@@ -644,29 +651,27 @@ def main(cfg: DQNConfig) -> None:
     for ep in range(eval_episodes):
         key, reset_key = jax.random.split(key)
         env_state, obs_dict = env.reset(reset_key)
-        obs = observation_to_array(obs_dict["pursuer"])
+        pursuer_obs = observation_to_array(obs_dict["pursuer"])
+        evader_obs = observation_to_array(obs_dict["evader"])
 
         ep_reward = 0.0
 
         for step in range(cfg.max_steps):
-            # Greedy action
-            q_values = q_network.apply(q_state.params, obs)
-            action = int(jnp.argmax(q_values))
-            pursuer_force = discretize_action(action, cfg.num_actions_per_dim, env.params.max_force)
+            # Greedy action for pursuer
+            q_values = q_network.apply(q_state.params, pursuer_obs)
+            pursuer_action = int(jnp.argmax(q_values))
+            pursuer_force = discretize_action(pursuer_action, cfg.num_actions_per_dim, env.params.max_force)
 
-            # Random evader
-            key, evader_key = jax.random.split(key)
-            evader_force = jax.random.uniform(
-                evader_key,
-                shape=(2,),
-                minval=-env.params.max_force,
-                maxval=env.params.max_force
-            )
+            # Greedy action for evader
+            q_values_evader = q_network.apply(q_state.params, evader_obs)
+            evader_action = int(jnp.argmax(q_values_evader))
+            evader_force = discretize_action(evader_action, cfg.num_actions_per_dim, env.params.max_force)
 
             actions = {"pursuer": pursuer_force, "evader": evader_force}
             env_state, obs_dict, rewards, done, info = env.step(env_state, actions)
 
-            obs = observation_to_array(obs_dict["pursuer"])
+            pursuer_obs = observation_to_array(obs_dict["pursuer"])
+            evader_obs = observation_to_array(obs_dict["evader"])
             ep_reward += rewards["pursuer"]
 
             if done:
