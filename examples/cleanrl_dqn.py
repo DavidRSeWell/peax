@@ -50,7 +50,7 @@ class DQNConfig:
     """the learning rate of the optimizer (reduced for stability)"""
     buffer_size: int = 50000
     """the replay memory buffer size (increased to reduce overfitting)"""
-    gamma: float = 0.95
+    gamma: float = 0.9
     """the discount factor gamma (reduced to limit value accumulation)"""
     tau: float = 1.0
     """the target network update rate (1.0 = hard update)"""
@@ -60,8 +60,8 @@ class DQNConfig:
     """the batch size of sample from the reply memory"""
     start_e: float = 1.0
     """the starting epsilon for exploration"""
-    end_e: float = 0.05
-    """the ending epsilon for exploration"""
+    end_e: float = 0.1
+    """the ending epsilon for exploration (increased for more exploration)"""
     exploration_fraction: float = 0.5
     """the fraction of `total-timesteps` it takes from start-e to end-e"""
     learning_starts: int = 10000
@@ -70,10 +70,10 @@ class DQNConfig:
     """the frequency of training"""
     eval_every: int = 10000
     """evaluate and log metrics every N timesteps"""
-    max_grad_norm: float = 10.0
-    """maximum gradient norm for clipping"""
-    reward_clip: float = 10.0
-    """clip rewards to [-reward_clip, reward_clip]"""
+    max_grad_norm: float = 1.0
+    """maximum gradient norm for clipping (reduced for stability)"""
+    reward_clip: float = 2.0
+    """clip rewards to [-reward_clip, reward_clip] (reduced for stability)"""
 
     # Environment specific arguments
     boundary_type: str = "square"
@@ -149,14 +149,23 @@ class ReplayBuffer:
         )
 
 
-def observation_to_array(obs: Observation) -> np.ndarray:
-    """Convert Observation NamedTuple to flat array."""
+def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_velocity: float = 20.0) -> np.ndarray:
+    """Convert Observation NamedTuple to normalized flat array.
+
+    Args:
+        obs: Observation namedtuple
+        boundary_size: Size of the boundary for normalizing positions
+        max_velocity: Maximum expected velocity for normalization
+
+    Returns:
+        Normalized observation array with values roughly in [-1, 1]
+    """
     return np.concatenate([
-        np.array(obs.own_position),
-        np.array(obs.own_velocity),
-        np.array(obs.other_position),
-        np.array(obs.other_velocity),
-        np.array([obs.time_remaining])
+        np.array(obs.own_position) / (boundary_size / 2),  # Normalize to ~[-1, 1]
+        np.array(obs.own_velocity) / max_velocity,  # Normalize velocities
+        np.array(obs.other_position) / (boundary_size / 2),  # Normalize to ~[-1, 1]
+        np.array(obs.other_velocity) / max_velocity,  # Normalize velocities
+        np.array([obs.time_remaining])  # Already in [0, 1]
     ])
 
 
@@ -221,13 +230,13 @@ def render_episode_to_gif(
 
     for step in range(max_steps):
         # Greedy action for pursuer
-        pursuer_obs = observation_to_array(obs_dict["pursuer"])
+        pursuer_obs = observation_to_array(obs_dict["pursuer"], env.params.boundary_size)
         q_values = q_network.apply(q_state.params, pursuer_obs)
         action = int(jnp.argmax(q_values))
         pursuer_force = discretize_action(action, num_actions_per_dim, env.params.max_force)
 
         # Greedy action for evader
-        evader_obs = observation_to_array(obs_dict["evader"])
+        evader_obs = observation_to_array(obs_dict["evader"], env.params.boundary_size)
         q_values_evader = q_network.apply(q_state.params, evader_obs)
         action_evader = int(jnp.argmax(q_values_evader))
         evader_force = discretize_action(action_evader, num_actions_per_dim, env.params.max_force)
@@ -405,7 +414,7 @@ def main(cfg: DQNConfig) -> None:
 
     @jax.jit
     def update(q_state: TrainState, observations, actions, next_observations, rewards, dones):
-        """Update Q-network with Huber loss and reward clipping."""
+        """Update Q-network with Double DQN, Huber loss, and reward clipping."""
         def loss_fn(params):
             # Clip rewards for stability
             clipped_rewards = jnp.clip(rewards, -cfg.reward_clip, cfg.reward_clip)
@@ -414,30 +423,35 @@ def main(cfg: DQNConfig) -> None:
             q_pred = q_network.apply(params, observations)
             q_pred = q_pred[jnp.arange(q_pred.shape[0]), actions.squeeze()]
 
-            # Target Q-values
-            q_next = q_network.apply(q_state.target_params, next_observations)
-            q_next = jnp.max(q_next, axis=-1)
+            # Double DQN: use online network to select actions, target network to evaluate
+            # This reduces overestimation bias
+            q_next_online = q_network.apply(params, next_observations)
+            next_actions = jnp.argmax(q_next_online, axis=-1)  # Select with online network
+
+            q_next_target = q_network.apply(q_state.target_params, next_observations)
+            q_next = q_next_target[jnp.arange(q_next_target.shape[0]), next_actions]  # Evaluate with target network
+
             q_target = clipped_rewards + cfg.gamma * q_next * (1 - dones)
 
             # Huber loss (more robust to outliers than MSE)
             td_error = q_pred - jax.lax.stop_gradient(q_target)
             huber_loss = optax.huber_loss(td_error, delta=1.0).mean()
 
-            return huber_loss, (q_pred.mean(), q_target.mean())
+            return huber_loss, (q_pred.mean(), q_target.mean(), q_next.max(), q_next.min())
 
-        (loss, (q_mean, q_target_mean)), grads = jax.value_and_grad(loss_fn, has_aux=True)(q_state.params)
+        (loss, (q_mean, q_target_mean, q_max, q_min)), grads = jax.value_and_grad(loss_fn, has_aux=True)(q_state.params)
 
         # Compute gradient norm for monitoring
         grad_norm = optax.global_norm(grads)
 
         q_state = q_state.apply_gradients(grads=grads)
-        return q_state, loss, q_mean, q_target_mean, grad_norm
+        return q_state, loss, q_mean, q_target_mean, grad_norm, q_max, q_min
 
     # Training loop
     key, reset_key = jax.random.split(key)
     env_state, obs_dict = env.reset(reset_key)
-    pursuer_obs = observation_to_array(obs_dict["pursuer"])
-    evader_obs = observation_to_array(obs_dict["evader"])
+    pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
+    evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
 
     episode_rewards = []
     episode_lengths = []
@@ -478,8 +492,8 @@ def main(cfg: DQNConfig) -> None:
         actions = {"pursuer": pursuer_force, "evader": evader_force}
         next_env_state, next_obs_dict, rewards, done, info = env.step(env_state, actions)
 
-        next_pursuer_obs = observation_to_array(next_obs_dict["pursuer"])
-        next_evader_obs = observation_to_array(next_obs_dict["evader"])
+        next_pursuer_obs = observation_to_array(next_obs_dict["pursuer"], cfg.boundary_size)
+        next_evader_obs = observation_to_array(next_obs_dict["evader"], cfg.boundary_size)
         pursuer_reward = rewards["pursuer"]
         evader_reward = rewards["evader"]
 
@@ -518,15 +532,15 @@ def main(cfg: DQNConfig) -> None:
             # Reset environment
             key, reset_key = jax.random.split(key)
             env_state, obs_dict = env.reset(reset_key)
-            pursuer_obs = observation_to_array(obs_dict["pursuer"])
-            evader_obs = observation_to_array(obs_dict["evader"])
+            pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
+            evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
             episode_reward = 0.0
             episode_length = 0
 
         # Training step
         if global_step > cfg.learning_starts and global_step % cfg.train_frequency == 0:
             batch = rb.sample(cfg.batch_size)
-            q_state, loss, q_mean, q_target_mean, grad_norm = update(
+            q_state, loss, q_mean, q_target_mean, grad_norm, q_max, q_min = update(
                 q_state,
                 batch["observations"],
                 batch["actions"],
@@ -541,6 +555,8 @@ def main(cfg: DQNConfig) -> None:
                 writer.add_scalar("losses/q_values", float(q_mean), global_step)
                 writer.add_scalar("losses/q_targets", float(q_target_mean), global_step)
                 writer.add_scalar("losses/grad_norm", float(grad_norm), global_step)
+                writer.add_scalar("losses/q_max", float(q_max), global_step)
+                writer.add_scalar("losses/q_min", float(q_min), global_step)
                 sps = int(global_step / (time.time() - start_time))
                 writer.add_scalar("charts/SPS", sps, global_step)
 
@@ -565,8 +581,8 @@ def main(cfg: DQNConfig) -> None:
             for eval_ep in range(eval_episodes):
                 key, eval_key = jax.random.split(key)
                 eval_state, eval_obs_dict = env.reset(eval_key)
-                eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"])
-                eval_evader_obs = observation_to_array(eval_obs_dict["evader"])
+                eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"], cfg.boundary_size)
+                eval_evader_obs = observation_to_array(eval_obs_dict["evader"], cfg.boundary_size)
                 eval_reward = 0.0
 
                 for eval_step in range(cfg.max_steps):
@@ -583,8 +599,8 @@ def main(cfg: DQNConfig) -> None:
                     eval_actions = {"pursuer": eval_pursuer_force, "evader": eval_evader_force}
                     eval_state, eval_obs_dict, eval_rewards_dict, eval_done, eval_info = env.step(eval_state, eval_actions)
 
-                    eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"])
-                    eval_evader_obs = observation_to_array(eval_obs_dict["evader"])
+                    eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"], cfg.boundary_size)
+                    eval_evader_obs = observation_to_array(eval_obs_dict["evader"], cfg.boundary_size)
                     eval_reward += eval_rewards_dict["pursuer"]
 
                     if eval_done:
@@ -669,8 +685,8 @@ def main(cfg: DQNConfig) -> None:
     for ep in range(eval_episodes):
         key, reset_key = jax.random.split(key)
         env_state, obs_dict = env.reset(reset_key)
-        pursuer_obs = observation_to_array(obs_dict["pursuer"])
-        evader_obs = observation_to_array(obs_dict["evader"])
+        pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
+        evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
 
         ep_reward = 0.0
 
@@ -688,8 +704,8 @@ def main(cfg: DQNConfig) -> None:
             actions = {"pursuer": pursuer_force, "evader": evader_force}
             env_state, obs_dict, rewards, done, info = env.step(env_state, actions)
 
-            pursuer_obs = observation_to_array(obs_dict["pursuer"])
-            evader_obs = observation_to_array(obs_dict["evader"])
+            pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
+            evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
             ep_reward += rewards["pursuer"]
 
             if done:
