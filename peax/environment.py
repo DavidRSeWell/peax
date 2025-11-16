@@ -36,6 +36,8 @@ class PursuerEvaderEnv:
         pursuer_mass: float = 1.0,
         evader_mass: float = 1.0,
         max_force: float = 10.0,
+        wall_penalty_coef: float = 0.0,
+        velocity_reward_coef: float = 0.0,
     ):
         """Initialize the pursuer-evader environment.
 
@@ -48,6 +50,8 @@ class PursuerEvaderEnv:
             pursuer_mass: Mass of pursuer agent
             evader_mass: Mass of evader agent
             max_force: Maximum force magnitude
+            wall_penalty_coef: Coefficient for wall proximity penalty (0.0 = disabled)
+            velocity_reward_coef: Coefficient for velocity reward (0.0 = disabled)
         """
         self.boundary_type = boundary_type
         self.boundary = create_boundary(boundary_type, boundary_size)
@@ -59,6 +63,8 @@ class PursuerEvaderEnv:
             evader_mass=evader_mass,
             max_force=max_force,
             boundary_size=boundary_size,
+            wall_penalty_coef=wall_penalty_coef,
+            velocity_reward_coef=velocity_reward_coef,
         )
 
     def reset(self, key: PRNGKey) -> Tuple[EnvState, Dict[str, Observation]]:
@@ -211,6 +217,8 @@ class PursuerEvaderEnv:
         This is a zero-sum game with shaped rewards:
         - Terminal: Pursuer gets +1 for capture, -1 for timeout
         - Immediate: Distance-based shaping (±0.005 per step)
+        - Wall penalty: Optional penalty for being near walls
+        - Velocity reward: Optional reward for movement
         - Cumulative shaping over 200 steps ≈ ±1.0, so terminal rewards dominate
 
         Args:
@@ -229,6 +237,38 @@ class PursuerEvaderEnv:
         # 0.005 * 200 steps = 1.0 max cumulative, matching terminal reward magnitude
         distance_reward = -0.005 * normalized_dist  # Pursuer wants to minimize distance
 
+        # Wall proximity penalty (for both agents to discourage wall-sitting)
+        wall_penalty_pursuer = 0.0
+        wall_penalty_evader = 0.0
+        if self.params.wall_penalty_coef > 0.0:
+            # Distance to nearest wall (for square boundary)
+            half_size = self.params.boundary_size / 2
+            pursuer_wall_dist = jnp.min(jnp.array([
+                half_size - jnp.abs(state.pursuer.position[0]),
+                half_size - jnp.abs(state.pursuer.position[1])
+            ]))
+            evader_wall_dist = jnp.min(jnp.array([
+                half_size - jnp.abs(state.evader.position[0]),
+                half_size - jnp.abs(state.evader.position[1])
+            ]))
+
+            # Penalty inversely proportional to wall distance (0 at center, -1 at wall)
+            # Normalized by half_size so max penalty is -wall_penalty_coef
+            wall_penalty_pursuer = -self.params.wall_penalty_coef * (1.0 - pursuer_wall_dist / half_size)
+            wall_penalty_evader = -self.params.wall_penalty_coef * (1.0 - evader_wall_dist / half_size)
+
+        # Velocity reward (encourage movement)
+        velocity_reward_pursuer = 0.0
+        velocity_reward_evader = 0.0
+        if self.params.velocity_reward_coef > 0.0:
+            # Reward based on velocity magnitude (normalized by expected max velocity)
+            max_expected_velocity = 20.0  # Approximate max velocity
+            pursuer_speed = jnp.linalg.norm(state.pursuer.velocity)
+            evader_speed = jnp.linalg.norm(state.evader.velocity)
+
+            velocity_reward_pursuer = self.params.velocity_reward_coef * (pursuer_speed / max_expected_velocity)
+            velocity_reward_evader = self.params.velocity_reward_coef * (evader_speed / max_expected_velocity)
+
         # Terminal rewards
         terminal_reward = jnp.where(
             captured,
@@ -236,10 +276,11 @@ class PursuerEvaderEnv:
             jnp.where(timeout, -1.0, 0.0)  # Evader wins or game continues
         )
 
-        pursuer_reward = terminal_reward + distance_reward
-
-        # Zero-sum: evader reward is negative of pursuer reward
-        evader_reward = -pursuer_reward
+        # Combine all rewards
+        pursuer_reward = (terminal_reward + distance_reward +
+                         wall_penalty_pursuer + velocity_reward_pursuer)
+        evader_reward = (-terminal_reward - distance_reward +
+                        wall_penalty_evader + velocity_reward_evader)
 
         return {
             "pursuer": float(pursuer_reward),

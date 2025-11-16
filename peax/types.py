@@ -40,6 +40,8 @@ class EnvParams(NamedTuple):
         evader_mass: Mass of evader
         max_force: Maximum force that can be applied
         boundary_size: Size of the boundary
+        wall_penalty_coef: Coefficient for wall proximity penalty (0.0 = disabled)
+        velocity_reward_coef: Coefficient for velocity reward (0.0 = disabled)
     """
     max_steps: int = 200
     dt: float = 0.1
@@ -48,6 +50,8 @@ class EnvParams(NamedTuple):
     evader_mass: float = 1.0
     max_force: float = 10.0
     boundary_size: float = 10.0
+    wall_penalty_coef: float = 0.0
+    velocity_reward_coef: float = 0.0
 
 
 class Observation(NamedTuple):

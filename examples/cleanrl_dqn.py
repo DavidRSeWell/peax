@@ -86,6 +86,10 @@ class DQNConfig:
     """capture radius"""
     num_actions_per_dim: int = 5
     """number of discrete actions per dimension (total actions = this squared)"""
+    wall_penalty_coef: float = 0.001
+    """coefficient for wall proximity penalty (0.0 = disabled)"""
+    velocity_reward_coef: float = 0.001
+    """coefficient for velocity reward (0.0 = disabled)"""
 
 
 # Register the config with Hydra's ConfigStore
@@ -362,6 +366,8 @@ def main(cfg: DQNConfig) -> None:
         boundary_size=cfg.boundary_size,
         max_steps=cfg.max_steps,
         capture_radius=cfg.capture_radius,
+        wall_penalty_coef=cfg.wall_penalty_coef,
+        velocity_reward_coef=cfg.velocity_reward_coef,
     )
 
     obs_dim = env.observation_space_dim
