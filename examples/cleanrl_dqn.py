@@ -38,7 +38,7 @@ from peax import PursuerEvaderEnv, Observation
 class DQNConfig:
     """Hyperparameters for DQN training."""
 
-    exp_name: str = "cleanrl_dqn_peax"
+    exp_name: str = "cleanrl_dqn_peax_selfplay"
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -46,15 +46,15 @@ class DQNConfig:
     # Algorithm specific arguments
     total_timesteps: int = 500000
     """total timesteps of the experiments"""
-    learning_rate: float = 2.5e-4
-    """the learning rate of the optimizer"""
-    buffer_size: int = 10000
-    """the replay memory buffer size"""
-    gamma: float = 0.99
-    """the discount factor gamma"""
+    learning_rate: float = 1e-4
+    """the learning rate of the optimizer (reduced for stability)"""
+    buffer_size: int = 50000
+    """the replay memory buffer size (increased to reduce overfitting)"""
+    gamma: float = 0.95
+    """the discount factor gamma (reduced to limit value accumulation)"""
     tau: float = 1.0
     """the target network update rate (1.0 = hard update)"""
-    target_network_frequency: int = 500
+    target_network_frequency: int = 1000
     """the timesteps it takes to update the target network"""
     batch_size: int = 128
     """the batch size of sample from the reply memory"""
@@ -70,6 +70,10 @@ class DQNConfig:
     """the frequency of training"""
     eval_every: int = 10000
     """evaluate and log metrics every N timesteps"""
+    max_grad_norm: float = 10.0
+    """maximum gradient norm for clipping"""
+    reward_clip: float = 10.0
+    """clip rewards to [-reward_clip, reward_clip]"""
 
     # Environment specific arguments
     boundary_type: str = "square"
@@ -371,8 +375,11 @@ def main(cfg: DQNConfig) -> None:
     dummy_obs = jnp.zeros((obs_dim,))
     q_params = q_network.init(q_key, dummy_obs)
 
-    # Optimizer
-    optimizer = optax.adam(learning_rate=cfg.learning_rate)
+    # Optimizer with gradient clipping
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(cfg.max_grad_norm),
+        optax.adam(learning_rate=cfg.learning_rate),
+    )
 
     # Training state
     q_state = TrainState.create(
@@ -398,8 +405,11 @@ def main(cfg: DQNConfig) -> None:
 
     @jax.jit
     def update(q_state: TrainState, observations, actions, next_observations, rewards, dones):
-        """Update Q-network."""
+        """Update Q-network with Huber loss and reward clipping."""
         def loss_fn(params):
+            # Clip rewards for stability
+            clipped_rewards = jnp.clip(rewards, -cfg.reward_clip, cfg.reward_clip)
+
             # Current Q-values
             q_pred = q_network.apply(params, observations)
             q_pred = q_pred[jnp.arange(q_pred.shape[0]), actions.squeeze()]
@@ -407,15 +417,21 @@ def main(cfg: DQNConfig) -> None:
             # Target Q-values
             q_next = q_network.apply(q_state.target_params, next_observations)
             q_next = jnp.max(q_next, axis=-1)
-            q_target = rewards + cfg.gamma * q_next * (1 - dones)
+            q_target = clipped_rewards + cfg.gamma * q_next * (1 - dones)
 
-            # MSE loss
-            loss = ((q_pred - jax.lax.stop_gradient(q_target)) ** 2).mean()
-            return loss, q_pred.mean()
+            # Huber loss (more robust to outliers than MSE)
+            td_error = q_pred - jax.lax.stop_gradient(q_target)
+            huber_loss = optax.huber_loss(td_error, delta=1.0).mean()
 
-        (loss, q_mean), grads = jax.value_and_grad(loss_fn, has_aux=True)(q_state.params)
+            return huber_loss, (q_pred.mean(), q_target.mean())
+
+        (loss, (q_mean, q_target_mean)), grads = jax.value_and_grad(loss_fn, has_aux=True)(q_state.params)
+
+        # Compute gradient norm for monitoring
+        grad_norm = optax.global_norm(grads)
+
         q_state = q_state.apply_gradients(grads=grads)
-        return q_state, loss, q_mean
+        return q_state, loss, q_mean, q_target_mean, grad_norm
 
     # Training loop
     key, reset_key = jax.random.split(key)
@@ -510,7 +526,7 @@ def main(cfg: DQNConfig) -> None:
         # Training step
         if global_step > cfg.learning_starts and global_step % cfg.train_frequency == 0:
             batch = rb.sample(cfg.batch_size)
-            q_state, loss, q_mean = update(
+            q_state, loss, q_mean, q_target_mean, grad_norm = update(
                 q_state,
                 batch["observations"],
                 batch["actions"],
@@ -523,6 +539,8 @@ def main(cfg: DQNConfig) -> None:
             if global_step % 100 == 0:
                 writer.add_scalar("losses/td_loss", float(loss), global_step)
                 writer.add_scalar("losses/q_values", float(q_mean), global_step)
+                writer.add_scalar("losses/q_targets", float(q_target_mean), global_step)
+                writer.add_scalar("losses/grad_norm", float(grad_norm), global_step)
                 sps = int(global_step / (time.time() - start_time))
                 writer.add_scalar("charts/SPS", sps, global_step)
 
