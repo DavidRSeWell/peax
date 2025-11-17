@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from peax import PursuerEvaderEnv
 
 
-def random_policy(key, obs, max_force=10.0):
+def random_policy(key, obs, max_force=5.0):
     """Simple random policy for demonstration."""
     return jax.random.uniform(key, shape=(2,), minval=-max_force, maxval=max_force)
 

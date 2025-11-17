@@ -84,7 +84,7 @@ class DQNConfig:
     """maximum steps per episode"""
     capture_radius: float = 0.5
     """capture radius"""
-    num_actions_per_dim: int = 5
+    num_actions_per_dim: int = 3
     """number of discrete actions per dimension (total actions = this squared)"""
     wall_penalty_coef: float = 0.01
     """coefficient for wall proximity penalty (0.0 = disabled)"""
@@ -153,17 +153,41 @@ class ReplayBuffer:
         )
 
 
-def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_velocity: float = 20.0) -> np.ndarray:
+def estimate_max_velocity(max_force: float, mass: float = 1.0, dt: float = 0.1, max_steps: int = 200) -> float:
+    """Estimate maximum velocity an agent can reach.
+
+    Assumes agent accelerates continuously for a fraction of the episode.
+    Rule of thumb: agents accelerate for ~max_steps/10 steps in practice.
+
+    Args:
+        max_force: Maximum force magnitude
+        mass: Agent mass
+        dt: Timestep duration
+        max_steps: Maximum episode steps
+
+    Returns:
+        Estimated maximum velocity
+    """
+    acceleration = max_force / mass
+    # Assume continuous acceleration for ~1/10th of episode
+    acceleration_duration = (max_steps / 10) * dt
+    return acceleration * acceleration_duration
+
+
+def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_force: float = 5.0) -> np.ndarray:
     """Convert Observation NamedTuple to normalized flat array.
 
     Args:
         obs: Observation namedtuple
         boundary_size: Size of the boundary for normalizing positions
-        max_velocity: Maximum expected velocity for normalization
+        max_force: Maximum force (used to estimate max velocity)
 
     Returns:
         Normalized observation array with values roughly in [-1, 1]
     """
+    # Estimate max velocity from physics
+    max_velocity = estimate_max_velocity(max_force)
+
     return np.concatenate([
         np.array(obs.own_position) / (boundary_size / 2),  # Normalize to ~[-1, 1]
         np.array(obs.own_velocity) / max_velocity,  # Normalize velocities
@@ -234,13 +258,13 @@ def render_episode_to_gif(
 
     for step in range(max_steps):
         # Greedy action for pursuer
-        pursuer_obs = observation_to_array(obs_dict["pursuer"], env.params.boundary_size)
+        pursuer_obs = observation_to_array(obs_dict["pursuer"], env.params.boundary_size, env.params.max_force)
         q_values = q_network.apply(q_state.params, pursuer_obs)
         action = int(jnp.argmax(q_values))
         pursuer_force = discretize_action(action, num_actions_per_dim, env.params.max_force)
 
         # Greedy action for evader
-        evader_obs = observation_to_array(obs_dict["evader"], env.params.boundary_size)
+        evader_obs = observation_to_array(obs_dict["evader"], env.params.boundary_size, env.params.max_force)
         q_values_evader = q_network.apply(q_state.params, evader_obs)
         action_evader = int(jnp.argmax(q_values_evader))
         evader_force = discretize_action(action_evader, num_actions_per_dim, env.params.max_force)
@@ -456,8 +480,8 @@ def main(cfg: DQNConfig) -> None:
     # Training loop
     key, reset_key = jax.random.split(key)
     env_state, obs_dict = env.reset(reset_key)
-    pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
-    evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
+    pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size, env.params.max_force)
+    evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size, env.params.max_force)
 
     episode_rewards = []
     episode_lengths = []
@@ -498,8 +522,8 @@ def main(cfg: DQNConfig) -> None:
         actions = {"pursuer": pursuer_force, "evader": evader_force}
         next_env_state, next_obs_dict, rewards, done, info = env.step(env_state, actions)
 
-        next_pursuer_obs = observation_to_array(next_obs_dict["pursuer"], cfg.boundary_size)
-        next_evader_obs = observation_to_array(next_obs_dict["evader"], cfg.boundary_size)
+        next_pursuer_obs = observation_to_array(next_obs_dict["pursuer"], cfg.boundary_size, env.params.max_force)
+        next_evader_obs = observation_to_array(next_obs_dict["evader"], cfg.boundary_size, env.params.max_force)
         pursuer_reward = rewards["pursuer"]
         evader_reward = rewards["evader"]
 
@@ -538,8 +562,8 @@ def main(cfg: DQNConfig) -> None:
             # Reset environment
             key, reset_key = jax.random.split(key)
             env_state, obs_dict = env.reset(reset_key)
-            pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
-            evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
+            pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size, env.params.max_force)
+            evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size, env.params.max_force)
             episode_reward = 0.0
             episode_length = 0
 
@@ -587,8 +611,8 @@ def main(cfg: DQNConfig) -> None:
             for eval_ep in range(eval_episodes):
                 key, eval_key = jax.random.split(key)
                 eval_state, eval_obs_dict = env.reset(eval_key)
-                eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"], cfg.boundary_size)
-                eval_evader_obs = observation_to_array(eval_obs_dict["evader"], cfg.boundary_size)
+                eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"], cfg.boundary_size, env.params.max_force)
+                eval_evader_obs = observation_to_array(eval_obs_dict["evader"], cfg.boundary_size, env.params.max_force)
                 eval_reward = 0.0
 
                 for eval_step in range(cfg.max_steps):
@@ -605,8 +629,8 @@ def main(cfg: DQNConfig) -> None:
                     eval_actions = {"pursuer": eval_pursuer_force, "evader": eval_evader_force}
                     eval_state, eval_obs_dict, eval_rewards_dict, eval_done, eval_info = env.step(eval_state, eval_actions)
 
-                    eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"], cfg.boundary_size)
-                    eval_evader_obs = observation_to_array(eval_obs_dict["evader"], cfg.boundary_size)
+                    eval_pursuer_obs = observation_to_array(eval_obs_dict["pursuer"], cfg.boundary_size, env.params.max_force)
+                    eval_evader_obs = observation_to_array(eval_obs_dict["evader"], cfg.boundary_size, env.params.max_force)
                     eval_reward += eval_rewards_dict["pursuer"]
 
                     if eval_done:
@@ -691,8 +715,8 @@ def main(cfg: DQNConfig) -> None:
     for ep in range(eval_episodes):
         key, reset_key = jax.random.split(key)
         env_state, obs_dict = env.reset(reset_key)
-        pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
-        evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
+        pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size, env.params.max_force)
+        evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size, env.params.max_force)
 
         ep_reward = 0.0
 
@@ -710,8 +734,8 @@ def main(cfg: DQNConfig) -> None:
             actions = {"pursuer": pursuer_force, "evader": evader_force}
             env_state, obs_dict, rewards, done, info = env.step(env_state, actions)
 
-            pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size)
-            evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size)
+            pursuer_obs = observation_to_array(obs_dict["pursuer"], cfg.boundary_size, env.params.max_force)
+            evader_obs = observation_to_array(obs_dict["evader"], cfg.boundary_size, env.params.max_force)
             ep_reward += rewards["pursuer"]
 
             if done:

@@ -48,7 +48,7 @@ class EnvParams(NamedTuple):
     capture_radius: float = 0.5
     pursuer_mass: float = 1.0
     evader_mass: float = 1.0
-    max_force: float = 10.0
+    max_force: float = 5.0
     boundary_size: float = 10.0
     wall_penalty_coef: float = 0.0
     velocity_reward_coef: float = 0.0

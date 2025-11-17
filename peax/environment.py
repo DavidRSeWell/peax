@@ -15,6 +15,27 @@ from peax.dynamics import (
 )
 
 
+def estimate_max_velocity(max_force: float, mass: float = 1.0, dt: float = 0.1, max_steps: int = 200) -> float:
+    """Estimate maximum velocity an agent can reach.
+
+    Assumes agent accelerates continuously for a fraction of the episode.
+    Rule of thumb: agents accelerate for ~max_steps/10 steps in practice.
+
+    Args:
+        max_force: Maximum force magnitude
+        mass: Agent mass
+        dt: Timestep duration
+        max_steps: Maximum episode steps
+
+    Returns:
+        Estimated maximum velocity
+    """
+    acceleration = max_force / mass
+    # Assume continuous acceleration for ~1/10th of episode
+    acceleration_duration = (max_steps / 10) * dt
+    return acceleration * acceleration_duration
+
+
 class PursuerEvaderEnv:
     """Pursuer-Evader environment for reinforcement learning.
 
@@ -234,8 +255,8 @@ class PursuerEvaderEnv:
         normalized_dist = dist / self.boundary.max_dist
 
         # Small immediate reward scaled to not dominate terminal reward
-        # 0.005 * 200 steps = 1.0 max cumulative, matching terminal reward magnitude
-        distance_reward = -0.005 * normalized_dist  # Pursuer wants to minimize distance
+        # Reduced from 0.005 to 0.002 to make wall/velocity rewards more influential
+        distance_reward = -0.002 * normalized_dist  # Pursuer wants to minimize distance
 
         # Wall proximity penalty (for both agents to discourage wall-sitting)
         wall_penalty_pursuer = 0.0
@@ -262,7 +283,12 @@ class PursuerEvaderEnv:
         velocity_reward_evader = 0.0
         if self.params.velocity_reward_coef > 0.0:
             # Reward based on velocity magnitude (normalized by expected max velocity)
-            max_expected_velocity = 20.0  # Approximate max velocity
+            max_expected_velocity = estimate_max_velocity(
+                self.params.max_force,
+                self.params.pursuer_mass,
+                self.params.dt,
+                self.params.max_steps
+            )
             pursuer_speed = jnp.linalg.norm(state.pursuer.velocity)
             evader_speed = jnp.linalg.norm(state.evader.velocity)
 
