@@ -24,6 +24,11 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import linprog
 from omegaconf import OmegaConf
+from tensorboardX import SummaryWriter
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.animation import FuncAnimation, PillowWriter
+from PIL import Image
 
 from peax import PursuerEvaderEnv, Observation
 
@@ -323,6 +328,156 @@ class MinimaxQLearning:
         print(f"Loaded Q-table from {filepath}")
 
 
+def render_episode_to_gif(
+    env: PursuerEvaderEnv,
+    learner: MinimaxQLearning,
+    cfg: MinimaxQConfig,
+    key: jax.Array,
+    filename: str,
+    max_steps: int = 200,
+    num_episodes: int = 5
+) -> Dict:
+    """Render multiple episodes and save as GIF.
+
+    Args:
+        env: Environment
+        learner: Minimax Q-learning agent
+        cfg: Configuration
+        key: JAX random key
+        filename: Output GIF filename
+        max_steps: Maximum steps to render
+        num_episodes: Number of episodes to render (from different starting states)
+
+    Returns:
+        Dict with aggregated episode info
+    """
+    all_states = []
+    total_reward = 0.0
+    num_captured = 0
+    num_timeout = 0
+    total_length = 0
+
+    # Collect states from multiple episodes
+    for ep in range(num_episodes):
+        key, reset_key = jax.random.split(key)
+        env_state, obs_dict = env.reset(reset_key)
+        all_states.append(env_state)
+
+        episode_reward = 0.0
+
+        for step in range(max_steps):
+            # Greedy actions (epsilon = 0)
+            pursuer_state_idx = discretize_state(obs_dict["pursuer"], cfg)
+            evader_state_idx = discretize_state(obs_dict["evader"], cfg)
+
+            pursuer_action_idx = learner.select_action(pursuer_state_idx, 0.0, "pursuer")
+            evader_action_idx = learner.select_action(evader_state_idx, 0.0, "evader")
+
+            pursuer_force = discretize_action(pursuer_action_idx, cfg.num_actions_per_dim, cfg.max_force)
+            evader_force = discretize_action(evader_action_idx, cfg.num_actions_per_dim, cfg.max_force)
+
+            # Step environment
+            actions = {"pursuer": pursuer_force, "evader": evader_force}
+            env_state, obs_dict, rewards, done, info = env.step(env_state, actions)
+
+            all_states.append(env_state)
+            episode_reward += rewards["pursuer"]
+
+            if done:
+                if info["captured"]:
+                    num_captured += 1
+                if info["timeout"]:
+                    num_timeout += 1
+                total_length += info["time"]
+                break
+
+        total_reward += episode_reward
+
+    # Create animation
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    def init():
+        ax.clear()
+        ax.set_xlim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_ylim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_aspect('equal')
+        return []
+
+    def update(frame):
+        ax.clear()
+        ax.set_xlim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_ylim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+
+        state = all_states[frame]
+
+        # Draw boundary
+        boundary_type = type(env.boundary).__name__
+        if "Square" in boundary_type:
+            size = env.params.boundary_size / 2
+            rect = patches.Rectangle(
+                (-size, -size), size * 2, size * 2,
+                linewidth=2, edgecolor='black', facecolor='none'
+            )
+            ax.add_patch(rect)
+        elif "Circle" in boundary_type:
+            circle = patches.Circle(
+                (0, 0), env.params.boundary_size / 2,
+                linewidth=2, edgecolor='black', facecolor='none'
+            )
+            ax.add_patch(circle)
+
+        # Draw agents
+        pursuer_pos = state.pursuer.position
+        evader_pos = state.evader.position
+
+        # Pursuer (red)
+        ax.plot(pursuer_pos[0], pursuer_pos[1], 'ro', markersize=12, label='Pursuer')
+        # Draw velocity arrow
+        if np.linalg.norm(state.pursuer.velocity) > 0.1:
+            ax.arrow(pursuer_pos[0], pursuer_pos[1],
+                    state.pursuer.velocity[0] * 0.5, state.pursuer.velocity[1] * 0.5,
+                    head_width=0.3, head_length=0.2, fc='red', ec='red', alpha=0.6)
+
+        # Evader (blue)
+        ax.plot(evader_pos[0], evader_pos[1], 'bo', markersize=12, label='Evader')
+        # Draw velocity arrow
+        if np.linalg.norm(state.evader.velocity) > 0.1:
+            ax.arrow(evader_pos[0], evader_pos[1],
+                    state.evader.velocity[0] * 0.5, state.evader.velocity[1] * 0.5,
+                    head_width=0.3, head_length=0.2, fc='blue', ec='blue', alpha=0.6)
+
+        # Draw capture radius
+        capture_circle = patches.Circle(
+            pursuer_pos, env.params.capture_radius,
+            linewidth=1, edgecolor='red', facecolor='red', alpha=0.2
+        )
+        ax.add_patch(capture_circle)
+
+        # Title with info
+        time_remaining = env.params.max_steps - state.time
+        ax.set_title(f'Step {state.time}/{env.params.max_steps} | Time Remaining: {time_remaining}')
+        ax.legend(loc='upper right')
+
+        return []
+
+    anim = FuncAnimation(fig, update, init_func=init, frames=len(all_states),
+                        interval=100, blit=True, repeat=True)
+
+    # Save as GIF
+    writer = PillowWriter(fps=10)
+    anim.save(filename, writer=writer)
+    plt.close(fig)
+
+    return {
+        "avg_reward": total_reward / num_episodes,
+        "capture_rate": num_captured / num_episodes,
+        "timeout_rate": num_timeout / num_episodes,
+        "avg_length": total_length / num_episodes if num_captured + num_timeout > 0 else max_steps
+    }
+
+
 @hydra.main(version_base=None, config_name="config")
 def main(cfg: MinimaxQConfig) -> None:
     """Main training loop for Minimax-Q learning."""
@@ -333,6 +488,13 @@ def main(cfg: MinimaxQConfig) -> None:
     print("=" * 70)
     print(OmegaConf.to_yaml(cfg))
     print("=" * 70)
+
+    # Initialize tensorboard writer
+    writer = SummaryWriter(f"runs/{cfg.exp_name}")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n" + "\n".join([f"|{key}|{value}|" for key, value in vars(cfg).items()]),
+    )
 
     # Set random seed
     np.random.seed(cfg.seed)
@@ -421,7 +583,14 @@ def main(cfg: MinimaxQConfig) -> None:
         # Log metrics
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
-        td_errors.append(episode_td_error / episode_length if episode_length > 0 else 0)
+        avg_td_error = episode_td_error / episode_length if episode_length > 0 else 0
+        td_errors.append(avg_td_error)
+
+        # Log to tensorboard
+        writer.add_scalar("charts/episodic_return", episode_reward, episode)
+        writer.add_scalar("charts/episodic_length", episode_length, episode)
+        writer.add_scalar("charts/epsilon", epsilon, episode)
+        writer.add_scalar("losses/td_error", avg_td_error, episode)
 
         # Print progress
         if (episode + 1) % 100 == 0:
@@ -486,6 +655,41 @@ def main(cfg: MinimaxQConfig) -> None:
             print(f"Average eval reward: {avg_eval_reward:.2f}")
             print(f"Capture rate: {capture_rate*100:.1f}%")
             print(f"Timeout rate: {timeout_rate*100:.1f}%")
+
+            # Log evaluation metrics to tensorboard
+            writer.add_scalar("eval/average_return", avg_eval_reward, episode)
+            writer.add_scalar("eval/capture_rate", capture_rate, episode)
+            writer.add_scalar("eval/timeout_rate", timeout_rate, episode)
+
+            # Generate and log GIF
+            print("Generating evaluation GIF...")
+            gif_path = f"eval_episode_{episode+1}.gif"
+            key, gif_key = jax.random.split(key)
+            gif_info = render_episode_to_gif(
+                env, learner, cfg, gif_key, gif_path, cfg.max_steps, num_episodes=5
+            )
+            print(f"GIF saved to {gif_path}")
+            print(f"  Avg reward: {gif_info['avg_reward']:.2f}")
+            print(f"  Capture rate: {gif_info['capture_rate']*100:.1f}%")
+            print(f"  Timeout rate: {gif_info['timeout_rate']*100:.1f}%")
+            print(f"  Avg length: {gif_info['avg_length']:.1f}")
+
+            # Log GIF to TensorBoard
+            try:
+                gif_image = Image.open(gif_path)
+                frames = []
+                try:
+                    while True:
+                        frames.append(np.array(gif_image.convert('RGB')))
+                        gif_image.seek(gif_image.tell() + 1)
+                except EOFError:
+                    pass
+                # Log first frame as image
+                if frames:
+                    writer.add_image("eval/episode_visualization", frames[0], episode, dataformats='HWC')
+            except Exception as e:
+                print(f"Warning: Could not log GIF to TensorBoard: {e}")
+
             print(f"{'='*70}\n")
 
             # Save checkpoint
@@ -499,6 +703,9 @@ def main(cfg: MinimaxQConfig) -> None:
 
     # Save final Q-table
     learner.save("minimax_q_final.pkl")
+
+    # Close tensorboard writer
+    writer.close()
 
 
 if __name__ == "__main__":
