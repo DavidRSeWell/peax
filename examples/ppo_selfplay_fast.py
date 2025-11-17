@@ -134,18 +134,20 @@ def sample_action(params, network, obs, key):
 
 
 def make_rollout_step(env: PursuerEvaderEnv, network: ActorCritic, max_force: float):
-    """Create a single rollout step function for jax.lax.scan."""
+    """Create a single rollout step function for jax.lax.scan.
+
+    IMPORTANT: We collect BOTH agents' transitions each step for proper self-play.
+    This doubles the effective batch size and provides consistent training signal.
+    """
 
     def rollout_step(carry, unused):
-        """One step of rollout collection."""
-        params, env_state, current_agent, key = carry
+        """One step of rollout collection - stores BOTH agents' transitions."""
+        params, env_state, key = carry
 
         # Get observations for both agents
-        obs_dict_pursuer = env._get_observations(env_state)["pursuer"]
-        obs_dict_evader = env._get_observations(env_state)["evader"]
-
-        obs_pursuer = observation_to_array(obs_dict_pursuer, env.params.boundary_size, max_force)
-        obs_evader = observation_to_array(obs_dict_evader, env.params.boundary_size, max_force)
+        obs_dict = env._get_observations(env_state)
+        obs_pursuer = observation_to_array(obs_dict["pursuer"], env.params.boundary_size, max_force)
+        obs_evader = observation_to_array(obs_dict["evader"], env.params.boundary_size, max_force)
 
         # Get actions for both agents
         key, key_p, key_e = jax.random.split(key, 3)
@@ -160,47 +162,22 @@ def make_rollout_step(env: PursuerEvaderEnv, network: ActorCritic, max_force: fl
         actions = {"pursuer": action_p, "evader": action_e}
         next_env_state, next_obs_dict, rewards_dict, done, info = env.step(env_state, actions)
 
-        # Store transition (we'll alternate which agent's transition we store)
-        # This implements self-play by training on both agents' experiences
-        obs = jax.lax.cond(
-            current_agent == 0,  # 0 = pursuer, 1 = evader
-            lambda: obs_pursuer,
-            lambda: obs_evader
-        )
-        action = jax.lax.cond(
-            current_agent == 0,
-            lambda: action_p,
-            lambda: action_e
-        )
-        log_prob = jax.lax.cond(
-            current_agent == 0,
-            lambda: log_prob_p,
-            lambda: log_prob_e
-        )
-        value = jax.lax.cond(
-            current_agent == 0,
-            lambda: value_p,
-            lambda: value_e
-        )
-        reward = jax.lax.cond(
-            current_agent == 0,
-            lambda: rewards_dict["pursuer"],
-            lambda: rewards_dict["evader"]
-        )
-
-        # Alternate agent for next step
-        next_agent = 1 - current_agent
-
+        # Store transitions for BOTH agents (critical for self-play!)
         transition = {
-            "obs": obs,
-            "action": action,
-            "log_prob": log_prob,
-            "value": value,
-            "reward": reward,
+            "obs_pursuer": obs_pursuer,
+            "obs_evader": obs_evader,
+            "action_pursuer": action_p,
+            "action_evader": action_e,
+            "log_prob_pursuer": log_prob_p,
+            "log_prob_evader": log_prob_e,
+            "value_pursuer": value_p,
+            "value_evader": value_e,
+            "reward_pursuer": rewards_dict["pursuer"],
+            "reward_evader": rewards_dict["evader"],
             "done": done,
         }
 
-        carry = (params, next_env_state, next_agent, key)
+        carry = (params, next_env_state, key)
         return carry, transition
 
     return rollout_step
@@ -479,7 +456,6 @@ def main(cfg: PPOConfig) -> None:
     # Initialize episode
     key, reset_key = jax.random.split(key)
     env_state, _ = env.reset(reset_key)
-    current_agent = 0  # Start with pursuer
 
     # Training loop
     num_updates = cfg.total_timesteps // batch_size
@@ -488,34 +464,59 @@ def main(cfg: PPOConfig) -> None:
         # === Collect Rollout using jax.lax.scan ===
         key, rollout_key = jax.random.split(key)
 
-        # Scan over num_steps
-        carry = (params, env_state, current_agent, rollout_key)
-        (params_out, env_state, current_agent, _), transitions = jax.lax.scan(
+        # Scan over num_steps - collects BOTH agents' transitions each step
+        carry = (params, env_state, rollout_key)
+        (params_out, env_state, _), transitions = jax.lax.scan(
             rollout_step_fn, carry, None, length=batch_size
         )
 
-        # Extract transitions
-        obs = transitions["obs"]  # [num_steps, obs_dim]
-        actions = transitions["action"]  # [num_steps, action_dim]
-        log_probs = transitions["log_prob"]  # [num_steps]
-        values = transitions["value"]  # [num_steps]
-        rewards = transitions["reward"]  # [num_steps]
+        # Extract transitions for BOTH agents
+        # This gives us 2*batch_size samples (one from pursuer, one from evader per step)
+        obs_pursuer = transitions["obs_pursuer"]  # [num_steps, obs_dim]
+        obs_evader = transitions["obs_evader"]    # [num_steps, obs_dim]
+        actions_pursuer = transitions["action_pursuer"]  # [num_steps, action_dim]
+        actions_evader = transitions["action_evader"]    # [num_steps, action_dim]
+        log_probs_pursuer = transitions["log_prob_pursuer"]  # [num_steps]
+        log_probs_evader = transitions["log_prob_evader"]    # [num_steps]
+        values_pursuer = transitions["value_pursuer"]  # [num_steps]
+        values_evader = transitions["value_evader"]    # [num_steps]
+        rewards_pursuer = transitions["reward_pursuer"]  # [num_steps]
+        rewards_evader = transitions["reward_evader"]    # [num_steps]
         dones = transitions["done"]  # [num_steps]
 
-        global_step += batch_size
+        # === Compute advantages SEPARATELY for each agent ===
+        # This is critical - both agents share the same done signal but have different rewards
+        advantages_pursuer = compute_gae(rewards_pursuer, values_pursuer, dones, cfg.gamma, cfg.gae_lambda)
+        returns_pursuer = advantages_pursuer + values_pursuer
 
-        # === Compute advantages ===
-        advantages = compute_gae(rewards, values, dones, cfg.gamma, cfg.gae_lambda)
-        returns = advantages + values
+        advantages_evader = compute_gae(rewards_evader, values_evader, dones, cfg.gamma, cfg.gae_lambda)
+        returns_evader = advantages_evader + values_evader
+
+        # Now concatenate (not interleave) for training
+        # This keeps temporal structure intact within each agent's trajectory
+        obs = jnp.concatenate([obs_pursuer, obs_evader], axis=0)  # [2*num_steps, obs_dim]
+        actions = jnp.concatenate([actions_pursuer, actions_evader], axis=0)
+        log_probs = jnp.concatenate([log_probs_pursuer, log_probs_evader], axis=0)
+        values = jnp.concatenate([values_pursuer, values_evader], axis=0)
+        rewards = jnp.concatenate([rewards_pursuer, rewards_evader], axis=0)
+        advantages = jnp.concatenate([advantages_pursuer, advantages_evader], axis=0)
+        returns = jnp.concatenate([returns_pursuer, returns_evader], axis=0)
+
+        # Update global_step to account for both agents
+        global_step += batch_size * 2  # 2x because we train on both agents' data
 
         # === PPO Update ===
+        # We now have 2*batch_size samples (both agents)
+        total_samples = batch_size * 2
+        mb_size = minibatch_size * 2  # Also double minibatch size
+
         for epoch in range(cfg.update_epochs):
             # Shuffle indices
             key, shuffle_key = jax.random.split(key)
-            perm = jax.random.permutation(shuffle_key, batch_size)
+            perm = jax.random.permutation(shuffle_key, total_samples)
 
-            for start in range(0, batch_size, minibatch_size):
-                end = start + minibatch_size
+            for start in range(0, total_samples, mb_size):
+                end = start + mb_size
                 mb_indices = perm[start:end]
 
                 # Get minibatch

@@ -258,9 +258,10 @@ class PursuerEvaderEnv:
         dist = jnp.linalg.norm(state.pursuer.position - state.evader.position)
         normalized_dist = dist / self.boundary.max_dist
 
-        # Small immediate reward scaled to not dominate terminal reward
-        # Reduced from 0.005 to 0.002 to make wall/velocity rewards more influential
-        distance_reward = -0.002 * normalized_dist  # Pursuer wants to minimize distance
+        # Distance-based reward shaping
+        # Increased from 0.002 to 0.05 to provide stronger learning signal
+        # Over 200 steps, this accumulates to ±10, providing clear gradient even before terminal reward
+        distance_reward = -0.05 * normalized_dist  # Pursuer wants to minimize distance
 
         # Wall proximity penalty (for both agents to discourage wall-sitting)
 
