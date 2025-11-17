@@ -240,7 +240,9 @@ def render_episode_to_gif(
     num_actions_per_dim: int,
     key: jax.Array,
     filename: str,
-    max_steps: int = 200
+    max_steps: int = 200,
+    num_episodes: int = 5
+
 ) -> Dict:
     """Render an episode and save as GIF.
 
@@ -256,35 +258,38 @@ def render_episode_to_gif(
     Returns:
         Dict with episode info (reward, captured, timeout, length)
     """
-    # Run episode and collect states
-    key, reset_key = jax.random.split(key)
-    env_state, obs_dict = env.reset(reset_key)
 
-    states = [env_state]
-    episode_reward = 0.0
-
-    for step in range(max_steps):
-        # Greedy action for pursuer
-        pursuer_obs = observation_to_array(obs_dict["pursuer"], env.params.boundary_size, env.params.max_force)
-        q_values = q_network.apply(q_state.params, pursuer_obs)
-        action = int(jnp.argmax(q_values))
-        pursuer_force = discretize_action(action, num_actions_per_dim, env.params.max_force)
-
-        # Greedy action for evader
-        evader_obs = observation_to_array(obs_dict["evader"], env.params.boundary_size, env.params.max_force)
-        q_values_evader = q_network.apply(q_state.params, evader_obs)
-        action_evader = int(jnp.argmax(q_values_evader))
-        evader_force = discretize_action(action_evader, num_actions_per_dim, env.params.max_force)
-
-        # Step environment
-        actions = {"pursuer": pursuer_force, "evader": evader_force}
-        env_state, obs_dict, rewards, done, info = env.step(env_state, actions)
-
+    states = []
+    for _ in range(num_episodes):
+        # Run episode and collect states
+        key, reset_key = jax.random.split(key)
+        env_state, obs_dict = env.reset(reset_key)
         states.append(env_state)
-        episode_reward += rewards["pursuer"]
 
-        if done:
-            break
+        episode_reward = 0.0
+
+        for step in range(max_steps):
+            # Greedy action for pursuer
+            pursuer_obs = observation_to_array(obs_dict["pursuer"], env.params.boundary_size, env.params.max_force)
+            q_values = q_network.apply(q_state.params, pursuer_obs)
+            action = int(jnp.argmax(q_values))
+            pursuer_force = discretize_action(action, num_actions_per_dim, env.params.max_force)
+
+            # Greedy action for evader
+            evader_obs = observation_to_array(obs_dict["evader"], env.params.boundary_size, env.params.max_force)
+            q_values_evader = q_network.apply(q_state.params, evader_obs)
+            action_evader = int(jnp.argmax(q_values_evader))
+            evader_force = discretize_action(action_evader, num_actions_per_dim, env.params.max_force)
+
+            # Step environment
+            actions = {"pursuer": pursuer_force, "evader": evader_force}
+            env_state, obs_dict, rewards, done, info = env.step(env_state, actions)
+
+            states.append(env_state)
+            episode_reward += rewards["pursuer"]
+
+            if done:
+                break
 
     # Create animation
     fig, ax = plt.subplots(figsize=(6, 6))
