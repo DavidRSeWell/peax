@@ -196,7 +196,11 @@ class PursuerEvaderEnv:
         return new_state, obs, rewards, bool(done), info
 
     def _get_observations(self, state: EnvState) -> Dict[str, Observation]:
-        """Get observations for both agents.
+        """Get observations for both agents using relative coordinates.
+
+        This follows the approach from the paper "Pursuit and evasion game between
+        UVAs based on multi-agent reinforcement learning" which uses relative
+        motion state equations to simplify the state space and improve learning.
 
         Args:
             state: Current environment state
@@ -206,19 +210,19 @@ class PursuerEvaderEnv:
         """
         time_remaining = float(self.params.max_steps - state.time) / self.params.max_steps
 
+        # Pursuer's observation: evader relative to pursuer
         pursuer_obs = Observation(
-            own_position=state.pursuer.position,
+            relative_position=state.evader.position - state.pursuer.position,
+            relative_velocity=state.evader.velocity - state.pursuer.velocity,
             own_velocity=state.pursuer.velocity,
-            other_position=state.evader.position,
-            other_velocity=state.evader.velocity,
             time_remaining=time_remaining,
         )
 
+        # Evader's observation: pursuer relative to evader
         evader_obs = Observation(
-            own_position=state.evader.position,
+            relative_position=state.pursuer.position - state.evader.position,
+            relative_velocity=state.pursuer.velocity - state.evader.velocity,
             own_velocity=state.evader.velocity,
-            other_position=state.pursuer.position,
-            other_velocity=state.pursuer.velocity,
             time_remaining=time_remaining,
         )
 
@@ -317,15 +321,14 @@ class PursuerEvaderEnv:
     def observation_space_dim(self) -> int:
         """Dimension of observation space.
 
-        Observation includes:
-        - Own position (2)
+        Observation includes (using relative coordinates):
+        - Relative position (2) - opponent position - own position
+        - Relative velocity (2) - opponent velocity - own velocity
         - Own velocity (2)
-        - Other position (2)
-        - Other velocity (2)
         - Time remaining (1)
-        Total: 9
+        Total: 7 (reduced from 9 with absolute coordinates)
         """
-        return 9
+        return 7
 
     @property
     def action_space_dim(self) -> int:

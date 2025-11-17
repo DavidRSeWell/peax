@@ -55,13 +55,19 @@ class EnvParams(NamedTuple):
 
 
 class Observation(NamedTuple):
-    """Observation for each agent.
+    """Observation for each agent using relative coordinates.
 
-    For the pursuer, this includes its own state and the evader's state.
-    For the evader, this includes its own state and the pursuer's state.
+    This representation is translation and rotation invariant, making
+    learning easier and more focused on the pursuit-evasion dynamics
+    rather than absolute positions.
+
+    For each agent, observations are relative to itself:
+    - relative_position: opponent position - own position (vector pointing to opponent)
+    - relative_velocity: opponent velocity - own velocity (closing velocity)
+    - own_velocity: own velocity (needed for control)
+    - time_remaining: normalized time left in episode
     """
-    own_position: Array  # shape (2,)
-    own_velocity: Array  # shape (2,)
-    other_position: Array  # shape (2,)
-    other_velocity: Array  # shape (2,)
-    time_remaining: float
+    relative_position: Array  # shape (2,) - vector from self to opponent
+    relative_velocity: Array  # shape (2,) - opponent_vel - own_vel
+    own_velocity: Array  # shape (2,) - own velocity
+    time_remaining: float  # normalized [0, 1]
