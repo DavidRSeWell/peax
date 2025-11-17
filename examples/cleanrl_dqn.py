@@ -60,7 +60,7 @@ class DQNConfig:
     """the batch size of sample from the reply memory"""
     start_e: float = 1.0
     """the starting epsilon for exploration"""
-    end_e: float = 0.1
+    end_e: float = 0.2
     """the ending epsilon for exploration (increased for more exploration)"""
     exploration_fraction: float = 0.5
     """the fraction of `total-timesteps` it takes from start-e to end-e"""
@@ -86,9 +86,9 @@ class DQNConfig:
     """capture radius"""
     num_actions_per_dim: int = 5
     """number of discrete actions per dimension (total actions = this squared)"""
-    wall_penalty_coef: float = 0.001
+    wall_penalty_coef: float = 0.01
     """coefficient for wall proximity penalty (0.0 = disabled)"""
-    velocity_reward_coef: float = 0.001
+    velocity_reward_coef: float = 0.005
     """coefficient for velocity reward (0.0 = disabled)"""
 
 
@@ -340,7 +340,7 @@ def render_episode_to_gif(
     }
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_name="config")
 def main(cfg: DQNConfig) -> None:
     """Main training function.
 
