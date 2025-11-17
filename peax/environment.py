@@ -185,15 +185,15 @@ class PursuerEvaderEnv:
         # Get observations
         obs = self._get_observations(new_state)
 
-        # Info dictionary
+        # Info dictionary (keep as JAX arrays for compatibility with jax.lax.scan)
         info = {
-            "captured": bool(captured),
-            "timeout": bool(timeout),
-            "distance": float(compute_distance(new_pursuer_state, new_evader_state)),
-            "time": int(new_time),
+            "captured": captured,
+            "timeout": timeout,
+            "distance": compute_distance(new_pursuer_state, new_evader_state),
+            "time": new_time,
         }
 
-        return new_state, obs, rewards, bool(done), info
+        return new_state, obs, rewards, done, info
 
     def _get_observations(self, state: EnvState) -> Dict[str, Observation]:
         """Get observations for both agents using relative coordinates.
@@ -208,7 +208,7 @@ class PursuerEvaderEnv:
         Returns:
             Dictionary with observations for "pursuer" and "evader"
         """
-        time_remaining = float(self.params.max_steps - state.time) / self.params.max_steps
+        time_remaining = (self.params.max_steps - state.time) / self.params.max_steps
 
         # Pursuer's observation: evader relative to pursuer
         pursuer_obs = Observation(
@@ -313,8 +313,8 @@ class PursuerEvaderEnv:
                         wall_penalty_evader + velocity_reward_evader)
 
         return {
-            "pursuer": float(pursuer_reward),
-            "evader": float(evader_reward),
+            "pursuer": pursuer_reward,
+            "evader": evader_reward,
         }
 
     @property

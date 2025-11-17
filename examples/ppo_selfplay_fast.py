@@ -229,6 +229,145 @@ def compute_gae(rewards, values, dones, gamma, gae_lambda):
     return advantages
 
 
+def render_episode_to_gif(
+    env: PursuerEvaderEnv,
+    network: ActorCritic,
+    params,
+    key: jax.Array,
+    filename: str,
+    max_steps: int = 200,
+    num_episodes: int = 5
+) -> Dict:
+    """Render multiple episodes and save as GIF."""
+    all_states = []
+    total_reward = 0.0
+    num_captured = 0
+    num_timeout = 0
+    total_length = 0
+
+    # Collect states from multiple episodes
+    for ep in range(num_episodes):
+        key, reset_key = jax.random.split(key)
+        env_state, obs_dict = env.reset(reset_key)
+        all_states.append(env_state)
+
+        episode_reward = 0.0
+
+        for step in range(max_steps):
+            # Get observations for both agents
+            obs_pursuer = observation_to_array(obs_dict["pursuer"], env.params.boundary_size, env.params.max_force)
+            obs_evader = observation_to_array(obs_dict["evader"], env.params.boundary_size, env.params.max_force)
+
+            # Get deterministic actions (mean)
+            action_mean_p, _, _ = network.apply(params, obs_pursuer)
+            action_mean_e, _, _ = network.apply(params, obs_evader)
+
+            pursuer_force = np.array(action_mean_p)
+            evader_force = np.array(action_mean_e)
+
+            # Clip to max_force
+            pursuer_force = np.clip(pursuer_force, -env.params.max_force, env.params.max_force)
+            evader_force = np.clip(evader_force, -env.params.max_force, env.params.max_force)
+
+            # Step environment
+            actions = {"pursuer": pursuer_force, "evader": evader_force}
+            env_state, obs_dict, rewards, done, info = env.step(env_state, actions)
+
+            all_states.append(env_state)
+            episode_reward += rewards["pursuer"]
+
+            if done:
+                if info["captured"]:
+                    num_captured += 1
+                if info["timeout"]:
+                    num_timeout += 1
+                total_length += info["time"]
+                break
+
+        total_reward += episode_reward
+
+    # Create animation
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    def init():
+        ax.clear()
+        ax.set_xlim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_ylim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_aspect('equal')
+        return []
+
+    def update(frame):
+        ax.clear()
+        ax.set_xlim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_ylim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+
+        state = all_states[frame]
+
+        # Draw boundary
+        boundary_type = type(env.boundary).__name__
+        if "Square" in boundary_type:
+            size = env.params.boundary_size / 2
+            rect = patches.Rectangle(
+                (-size, -size), size * 2, size * 2,
+                linewidth=2, edgecolor='black', facecolor='none'
+            )
+            ax.add_patch(rect)
+        elif "Circle" in boundary_type:
+            circle = patches.Circle(
+                (0, 0), env.params.boundary_size / 2,
+                linewidth=2, edgecolor='black', facecolor='none'
+            )
+            ax.add_patch(circle)
+
+        # Draw agents
+        pursuer_pos = state.pursuer.position
+        evader_pos = state.evader.position
+
+        # Pursuer (red)
+        ax.plot(pursuer_pos[0], pursuer_pos[1], 'ro', markersize=12, label='Pursuer')
+        if np.linalg.norm(state.pursuer.velocity) > 0.1:
+            ax.arrow(pursuer_pos[0], pursuer_pos[1],
+                    state.pursuer.velocity[0] * 0.5, state.pursuer.velocity[1] * 0.5,
+                    head_width=0.3, head_length=0.2, fc='red', ec='red', alpha=0.6)
+
+        # Evader (blue)
+        ax.plot(evader_pos[0], evader_pos[1], 'bo', markersize=12, label='Evader')
+        if np.linalg.norm(state.evader.velocity) > 0.1:
+            ax.arrow(evader_pos[0], evader_pos[1],
+                    state.evader.velocity[0] * 0.5, state.evader.velocity[1] * 0.5,
+                    head_width=0.3, head_length=0.2, fc='blue', ec='blue', alpha=0.6)
+
+        # Draw capture radius
+        capture_circle = patches.Circle(
+            pursuer_pos, env.params.capture_radius,
+            linewidth=1, edgecolor='red', facecolor='red', alpha=0.2
+        )
+        ax.add_patch(capture_circle)
+
+        # Title
+        time_remaining = env.params.max_steps - state.time
+        ax.set_title(f'Step {state.time}/{env.params.max_steps} | Time Remaining: {time_remaining}')
+        ax.legend(loc='upper right')
+
+        return []
+
+    anim = FuncAnimation(fig, update, init_func=init, frames=len(all_states),
+                        interval=100, blit=True, repeat=True)
+
+    writer = PillowWriter(fps=10)
+    anim.save(filename, writer=writer)
+    plt.close(fig)
+
+    return {
+        "avg_reward": total_reward / num_episodes,
+        "capture_rate": num_captured / num_episodes,
+        "timeout_rate": num_timeout / num_episodes,
+        "avg_length": total_length / num_episodes if num_captured + num_timeout > 0 else max_steps
+    }
+
+
 def ppo_loss(params, network, obs, actions, old_log_probs, advantages, returns, clip_coef, vf_coef, ent_coef):
     """Compute PPO loss."""
     action_mean, action_logstd, values = network.apply(params, obs)
@@ -328,6 +467,7 @@ def main(cfg: PPOConfig) -> None:
 
     # Training metrics
     global_step = 0
+    last_eval_step = 0  # Track last evaluation
     start_time = time.time()
     batch_size = cfg.num_steps
     minibatch_size = batch_size // cfg.num_minibatches
@@ -408,6 +548,100 @@ def main(cfg: PPOConfig) -> None:
             print(f"Update {update+1}/{num_updates} | Step {global_step} | SPS: {sps} | "
                   f"PG Loss: {float(pg_loss):.4f} | V Loss: {float(v_loss):.4f} | "
                   f"Entropy: {float(entropy):.4f} | Mean Reward: {float(rewards.mean()):.3f}")
+
+        # Evaluation (trigger when enough steps have passed since last eval)
+        if global_step - last_eval_step >= cfg.eval_every:
+            last_eval_step = global_step
+            print(f"\n{'='*70}")
+            print(f"Evaluation at step {global_step}")
+            print(f"{'='*70}")
+
+            eval_rewards_pursuer = []
+            eval_rewards_evader = []
+            eval_captures = 0
+            eval_timeouts = 0
+
+            for eval_ep in range(cfg.eval_episodes):
+                key, eval_key = jax.random.split(key)
+                eval_state, eval_obs_dict = env.reset(eval_key)
+
+                eval_reward_p = 0.0
+                eval_reward_e = 0.0
+
+                for eval_step in range(cfg.max_steps):
+                    # Deterministic actions
+                    obs_pursuer = observation_to_array(eval_obs_dict["pursuer"], env.params.boundary_size, env.params.max_force)
+                    obs_evader = observation_to_array(eval_obs_dict["evader"], env.params.boundary_size, env.params.max_force)
+
+                    action_mean_p, _, _ = network.apply(params, obs_pursuer)
+                    action_mean_e, _, _ = network.apply(params, obs_evader)
+
+                    pursuer_force = np.array(action_mean_p)
+                    evader_force = np.array(action_mean_e)
+
+                    pursuer_force = np.clip(pursuer_force, -cfg.max_force, cfg.max_force)
+                    evader_force = np.clip(evader_force, -cfg.max_force, cfg.max_force)
+
+                    eval_actions = {"pursuer": pursuer_force, "evader": evader_force}
+                    eval_state, eval_obs_dict, eval_rewards_dict, eval_done, eval_info = env.step(eval_state, eval_actions)
+
+                    eval_reward_p += eval_rewards_dict["pursuer"]
+                    eval_reward_e += eval_rewards_dict["evader"]
+
+                    if eval_done:
+                        if eval_info["captured"]:
+                            eval_captures += 1
+                        if eval_info["timeout"]:
+                            eval_timeouts += 1
+                        break
+
+                eval_rewards_pursuer.append(eval_reward_p)
+                eval_rewards_evader.append(eval_reward_e)
+
+            avg_eval_reward_p = np.mean(eval_rewards_pursuer)
+            avg_eval_reward_e = np.mean(eval_rewards_evader)
+            capture_rate = eval_captures / cfg.eval_episodes
+            timeout_rate = eval_timeouts / cfg.eval_episodes
+
+            print(f"Average eval reward (pursuer): {avg_eval_reward_p:.2f}")
+            print(f"Average eval reward (evader): {avg_eval_reward_e:.2f}")
+            print(f"Capture rate: {capture_rate*100:.1f}%")
+            print(f"Timeout rate: {timeout_rate*100:.1f}%")
+
+            # Log to tensorboard
+            writer.add_scalar("eval/average_return_pursuer", avg_eval_reward_p, global_step)
+            writer.add_scalar("eval/average_return_evader", avg_eval_reward_e, global_step)
+            writer.add_scalar("eval/capture_rate", capture_rate, global_step)
+            writer.add_scalar("eval/timeout_rate", timeout_rate, global_step)
+
+            # Generate GIF
+            print("Generating evaluation GIF...")
+            gif_path = f"eval_ppo_fast_step_{global_step}.gif"
+            key, gif_key = jax.random.split(key)
+            gif_info = render_episode_to_gif(
+                env, network, params, gif_key, gif_path, cfg.max_steps, num_episodes=5
+            )
+            print(f"GIF saved to {gif_path}")
+            print(f"  Avg reward: {gif_info['avg_reward']:.2f}")
+            print(f"  Capture rate: {gif_info['capture_rate']*100:.1f}%")
+            print(f"  Avg length: {gif_info['avg_length']:.1f}")
+
+            # Log GIF to tensorboard
+            try:
+                gif_image = Image.open(gif_path)
+                frames = []
+                try:
+                    while True:
+                        frames.append(np.array(gif_image.convert('RGB')))
+                        gif_image.seek(gif_image.tell() + 1)
+                except EOFError:
+                    pass
+                if frames:
+                    writer.add_image("eval/episode_visualization", frames[0], global_step, dataformats='HWC')
+            except Exception as e:
+                print(f"Warning: Could not log GIF to TensorBoard: {e}")
+
+            print(f"{'='*70}\n")
 
     print("\n" + "=" * 70)
     print("Training completed!")
