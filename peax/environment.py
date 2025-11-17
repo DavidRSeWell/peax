@@ -263,6 +263,7 @@ class PursuerEvaderEnv:
         distance_reward = -0.002 * normalized_dist  # Pursuer wants to minimize distance
 
         # Wall proximity penalty (for both agents to discourage wall-sitting)
+
         wall_penalty_pursuer = 0.0
         wall_penalty_evader = 0.0
         if self.params.wall_penalty_coef > 0.0:
