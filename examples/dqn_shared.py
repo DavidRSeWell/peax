@@ -152,14 +152,16 @@ def observation_to_array(obs: Observation) -> jax.Array:
         obs: Observation from environment
 
     Returns:
-        Flat array of observation values
+        10D array: [own_pos(2), own_vel(2), other_pos(2), other_vel(2), time(1), agent_id(1)]
+        agent_id is critical for self-play with shared policies
     """
     return jnp.concatenate([
         obs.own_position,
         obs.own_velocity,
         obs.other_position,
         obs.other_velocity,
-        jnp.array([obs.time_remaining])
+        jnp.array([obs.time_remaining]),
+        jnp.array([obs.agent_id])  # CRITICAL: tells network if it's pursuer or evader!
     ])
 
 

@@ -179,7 +179,7 @@ def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_forc
 
     Uses relative coordinates following the paper "Pursuit and evasion game between
     UVAs based on multi-agent reinforcement learning". This reduces observation
-    dimensionality from 9D to 7D and makes learning translation-invariant.
+    dimensionality from 9D to 8D and makes learning translation-invariant.
 
     Args:
         obs: Observation namedtuple (with relative coordinates)
@@ -188,7 +188,8 @@ def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_forc
 
     Returns:
         Normalized observation array with values roughly in [-1, 1]
-        Shape: (7,) = [rel_pos(2), rel_vel(2), own_vel(2), time(1)]
+        Shape: (8,) = [rel_pos(2), rel_vel(2), own_vel(2), time(1), agent_id(1)]
+        agent_id is critical for self-play with shared policies
     """
     # Estimate max velocity from physics
     max_velocity = estimate_max_velocity(max_force)
@@ -200,7 +201,8 @@ def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_forc
         np.array(obs.relative_position) / max_distance,  # Normalize to ~[-1, 1]
         np.array(obs.relative_velocity) / (2 * max_velocity),  # Relative vel can be larger
         np.array(obs.own_velocity) / max_velocity,  # Normalize own velocity
-        np.array([obs.time_remaining])  # Already in [0, 1]
+        np.array([obs.time_remaining]),  # Already in [0, 1]
+        np.array([obs.agent_id])  # CRITICAL: tells network if it's pursuer or evader!
     ])
 
 

@@ -118,11 +118,8 @@ def estimate_max_velocity(max_force: float, mass: float = 1.0, dt: float = 0.1, 
 def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_force: float = 5.0) -> np.ndarray:
     """Convert Observation to normalized numpy array.
 
-    Uses relative observations (7D):
-    - relative_position (2) - normalized by max distance
-    - relative_velocity (2) - normalized by max velocity
-    - own_velocity (2) - normalized by max velocity
-    - time_remaining (1) - already normalized [0, 1]
+    Returns 8D array: [rel_pos(2), rel_vel(2), own_vel(2), time(1), agent_id(1)]
+    Agent ID is critical for self-play with shared policy!
     """
     max_velocity = estimate_max_velocity(max_force)
     max_distance = boundary_size * np.sqrt(2)
@@ -131,7 +128,8 @@ def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_forc
         np.array(obs.relative_position) / max_distance,
         np.array(obs.relative_velocity) / (2 * max_velocity),
         np.array(obs.own_velocity) / max_velocity,
-        [obs.time_remaining]
+        [obs.time_remaining],
+        [obs.agent_id]  # CRITICAL: tells network if it's pursuer or evader!
     ])
 
 
@@ -443,7 +441,7 @@ def main(cfg: PPOConfig) -> None:
         velocity_reward_coef=cfg.velocity_reward_coef,
     )
 
-    obs_dim = 7  # Relative observations
+    obs_dim = 8  # [rel_pos(2), rel_vel(2), own_vel(2), time(1), agent_id(1)]
     action_dim = 2  # Force in x and y
 
     # Create network and agent
