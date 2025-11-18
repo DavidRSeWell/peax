@@ -216,6 +216,7 @@ class PursuerEvaderEnv:
             relative_velocity=state.evader.velocity - state.pursuer.velocity,
             own_velocity=state.pursuer.velocity,
             time_remaining=time_remaining,
+            agent_id=0.0,  # Pursuer ID
         )
 
         # Evader's observation: pursuer relative to evader
@@ -224,6 +225,7 @@ class PursuerEvaderEnv:
             relative_velocity=state.pursuer.velocity - state.evader.velocity,
             own_velocity=state.evader.velocity,
             time_remaining=time_remaining,
+            agent_id=1.0,  # Evader ID
         )
 
         return {
@@ -328,9 +330,10 @@ class PursuerEvaderEnv:
         - Relative velocity (2) - opponent velocity - own velocity
         - Own velocity (2)
         - Time remaining (1)
-        Total: 7 (reduced from 9 with absolute coordinates)
+        - Agent ID (1) - 0.0 for pursuer, 1.0 for evader
+        Total: 8 (critical for shared policy self-play!)
         """
-        return 7
+        return 8
 
     @property
     def action_space_dim(self) -> int:

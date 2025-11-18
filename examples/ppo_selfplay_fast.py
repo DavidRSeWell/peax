@@ -79,7 +79,10 @@ def estimate_max_velocity(max_force: float, mass: float = 1.0, dt: float = 0.1, 
 
 
 def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_force: float = 5.0) -> jnp.ndarray:
-    """Convert Observation to normalized JAX array."""
+    """Convert Observation to normalized JAX array.
+
+    Returns 8D array: [rel_pos(2), rel_vel(2), own_vel(2), time(1), agent_id(1)]
+    """
     max_velocity = estimate_max_velocity(max_force)
     max_distance = boundary_size * jnp.sqrt(2)
 
@@ -87,7 +90,8 @@ def observation_to_array(obs: Observation, boundary_size: float = 10.0, max_forc
         obs.relative_position / max_distance,
         obs.relative_velocity / (2 * max_velocity),
         obs.own_velocity / max_velocity,
-        jnp.array([obs.time_remaining])
+        jnp.array([obs.time_remaining]),
+        jnp.array([obs.agent_id])  # CRITICAL: tells network if it's pursuer or evader!
     ])
 
 
@@ -138,6 +142,8 @@ def make_rollout_step(env: PursuerEvaderEnv, network: ActorCritic, max_force: fl
 
     IMPORTANT: We collect BOTH agents' transitions each step for proper self-play.
     This doubles the effective batch size and provides consistent training signal.
+
+    CRITICAL: Episodes are automatically reset when done=True to maintain valid training data.
     """
 
     def rollout_step(carry, unused):
@@ -150,7 +156,7 @@ def make_rollout_step(env: PursuerEvaderEnv, network: ActorCritic, max_force: fl
         obs_evader = observation_to_array(obs_dict["evader"], env.params.boundary_size, max_force)
 
         # Get actions for both agents
-        key, key_p, key_e = jax.random.split(key, 3)
+        key, key_p, key_e, key_reset = jax.random.split(key, 4)
         action_p, log_prob_p, value_p = sample_action(params, network, obs_pursuer, key_p)
         action_e, log_prob_e, value_e = sample_action(params, network, obs_evader, key_e)
 
@@ -161,6 +167,14 @@ def make_rollout_step(env: PursuerEvaderEnv, network: ActorCritic, max_force: fl
         # Step environment
         actions = {"pursuer": action_p, "evader": action_e}
         next_env_state, next_obs_dict, rewards_dict, done, info = env.step(env_state, actions)
+
+        # CRITICAL: Reset environment if episode ended
+        # This prevents collecting invalid transitions after episode termination
+        reset_state, reset_obs = env.reset(key_reset)
+        next_env_state = jax.tree.map(
+            lambda x, y: jnp.where(done, x, y),
+            reset_state, next_env_state
+        )
 
         # Store transitions for BOTH agents (critical for self-play!)
         transition = {
@@ -408,7 +422,7 @@ def main(cfg: PPOConfig) -> None:
         velocity_reward_coef=cfg.velocity_reward_coef,
     )
 
-    obs_dim = 7
+    obs_dim = 8  # [rel_pos(2), rel_vel(2), own_vel(2), time(1), agent_id(1)]
     action_dim = 2
 
     # Create network

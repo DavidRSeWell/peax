@@ -66,8 +66,10 @@ class Observation(NamedTuple):
     - relative_velocity: opponent velocity - own velocity (closing velocity)
     - own_velocity: own velocity (needed for control)
     - time_remaining: normalized time left in episode
+    - agent_id: 0.0 for pursuer, 1.0 for evader (CRITICAL for shared policy self-play!)
     """
     relative_position: Array  # shape (2,) - vector from self to opponent
     relative_velocity: Array  # shape (2,) - opponent_vel - own_vel
     own_velocity: Array  # shape (2,) - own velocity
     time_remaining: float  # normalized [0, 1]
+    agent_id: float  # 0.0 = pursuer, 1.0 = evader
