@@ -168,8 +168,8 @@ def generate_episode(
 
         #p1_obs, p2_obs = get_p_obs(obs_dict["pursuer"])
 
-        p1_obs = np.array(np.concatenate((env_state.pursuer.position, env_state.pursuer.velocity, env_state.evader.position, env_state.evader.velocity, [int(env_state.time)])))
-        p2_obs = np.array(np.concatenate((env_state.evader.position, env_state.evader.velocity, env_state.pursuer.position, env_state.pursuer.velocity, [int(env_state.time)])))
+        p1_obs = np.array(np.concatenate((env_state.pursuer.position, env_state.pursuer.velocity, [0], [int(env_state.time)], env_state.evader.position, env_state.evader.velocity, [1], [int(env_state.time)])))
+        p2_obs = np.array(np.concatenate((env_state.evader.position, env_state.evader.velocity, [1], [int(env_state.time)], env_state.pursuer.position, env_state.pursuer.velocity, [0], [int(env_state.time)])))
 
 
 
@@ -322,9 +322,11 @@ def main():
         value="checkpoint_step_8000.pkl",
         help="Path to the trained agent checkpoint"
     )
+    checkpoint_path = "/home/drs4568/peax/checkpoint_step_490000.pkl"
 
     # Load FPTA model
     C = jnp.load("C.npy")
+    Y_grey = jnp.load("Y_grey.npy")
     
     model = LSTQD(basis)
     L, Q = model.get_low_rank(C)
@@ -436,9 +438,17 @@ def main():
         Y_p = model.Y(Q, L, p_trait)
         Y_e = model.Y(Q, L, e_trait)
 
-        print(f"Y_p = {Y_p.shape}")
+        #grey_p = jnp.vstack([jnp.expand_dims(episode_data[i]["pursuer_trait"], 1) for i in range(len(episode_data)) if i != current_step])
+        #grey_e = jnp.vstack([jnp.expand_dims(episode_data[i]["evader_trait"], 1) for i in range(len(episode_data)) if i != current_step])
+        #grey_total = jnp.vstack([grey_p, grey_e])
+        #Y_grey = jax.vmap(lambda x: model.Y(Q, L, x))(grey_total)
 
-        fig = plot_disc_game(Y_p[None, :2], Y_e[None, :2], title="Adv Map")
+        print(f"Y_p = {Y_p.shape}")
+        #print(f"grey_total = {grey_total.shape}")
+        print(f"Y_grey = {Y_grey.shape}")
+        print(f"p_trait = {p_trait.shape}")
+
+        fig = plot_disc_game(Y_p[None, :2], Y_e[None, :2], Y_grey, title="Adv Map")
         st.pyplot(fig)
         plt.close(fig)
 

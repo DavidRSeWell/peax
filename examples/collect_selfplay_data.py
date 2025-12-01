@@ -107,6 +107,19 @@ def run_selfplay_episode(
         pursuer_obs = observation_to_array(obs_dict["pursuer"])
         evader_obs = observation_to_array(obs_dict["evader"])
 
+        # Get obs for FPTA trianing not relative
+        pursuer_obs_normal = jnp.array([
+            env_state.pursuer.position[0], env_state.pursuer.position[1],
+            env_state.pursuer.velocity[0], env_state.pursuer.velocity[1],
+            pursuer_obs[-2], pursuer_obs[-1]
+        ])
+
+        evader_obs_normal = jnp.array([
+            env_state.evader.position[0], env_state.evader.position[1],
+            env_state.evader.velocity[0], env_state.evader.velocity[1],
+            evader_obs[-2], evader_obs[-1]
+        ])
+
         # Both agents use the same network (self-play)
         pursuer_action_idx, pursuer_force = select_greedy_action(
             q_network, params, pursuer_obs, num_actions_per_dim, env.params.max_force
@@ -123,19 +136,31 @@ def run_selfplay_episode(
         next_pursuer_obs = observation_to_array(next_obs_dict["pursuer"])
         next_evader_obs = observation_to_array(next_obs_dict["evader"])
 
+        next_pursuer_obs_normal = jnp.array([
+            next_env_state.pursuer.position[0], next_env_state.pursuer.position[1],
+            next_env_state.pursuer.velocity[0], next_env_state.pursuer.velocity[1],
+            next_pursuer_obs[-2], next_pursuer_obs[-1]
+        ])
+
+        next_evader_obs_normal = jnp.array([
+            next_env_state.evader.position[0], next_env_state.evader.position[1],
+            next_env_state.evader.velocity[0], next_env_state.evader.velocity[1],
+            next_evader_obs[-2], next_evader_obs[-1]
+        ])
+
         # Store pursuer transition
-        observations.append(pursuer_obs)
+        observations.append(jnp.concatenate((pursuer_obs_normal, evader_obs_normal)))
         actions.append(pursuer_action_idx)
         rewards.append(rewards_dict["pursuer"])
-        next_observations.append(next_pursuer_obs)
+        next_observations.append(jnp.concatenate((next_pursuer_obs_normal, next_evader_obs_normal)))
         dones_list.append(done)
         agent_ids.append(0)
         
         # Store evader transition
-        observations.append(evader_obs)
+        observations.append(jnp.concatenate((evader_obs_normal, pursuer_obs_normal)))
         actions.append(evader_action_idx)
         rewards.append(rewards_dict["evader"])
-        next_observations.append(next_evader_obs)
+        next_observations.append(jnp.concatenate((next_evader_obs_normal, next_pursuer_obs_normal)))
         dones_list.append(done)
         agent_ids.append(1)
 
@@ -204,10 +229,10 @@ def collect_selfplay_data(
 
     # Create example transition for buffer initialization
     example_transition = {
-        "observation": jnp.zeros(env.observation_space_dim, dtype=jnp.float32),
+        "observation": jnp.zeros(12, dtype=jnp.float32),
         "action": jnp.array(0, dtype=jnp.int32),
         "reward": jnp.array(0.0, dtype=jnp.float32),
-        "next_observation": jnp.zeros(env.observation_space_dim, dtype=jnp.float32),
+        "next_observation": jnp.zeros(12, dtype=jnp.float32),
         "done": jnp.array(0.0, dtype=jnp.float32),
         "agent_id": jnp.array(0, dtype=jnp.int32),
     }
@@ -331,7 +356,8 @@ def main():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        required=True,
+        required=False,
+        default="/home/drs4568/peax/checkpoint_step_490000.pkl",
         help="Path to agent checkpoint (.pkl file)"
     )
     parser.add_argument(

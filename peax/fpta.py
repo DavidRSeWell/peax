@@ -100,7 +100,7 @@ class LSTQD:
         print(p1_mask)
         '''
 
-        return obs[:, [0, 1, 2, 3, -1]], obs[:, [4, 5, 6, 7, -1]]
+        return obs[:, :6], obs[:, 6:]
 
     def basis_eval(self, obs):
 
@@ -131,7 +131,8 @@ class LSTQD:
         return B_xy
 
     def get_low_rank(self, C):
-        U, Q = jax.scipy.linalg.schur(C)
+        #U, Q = jax.scipy.linalg.schur(C)
+        U, Q = scipy.linalg.schur(C)
 
         pred_eigs = jnp.abs(scipy.linalg.eigvals(jnp.array(U)))
 
@@ -155,8 +156,6 @@ class LSTQD:
         print(b_x.max())
         return ((Q.T @ b_x) * jnp.sqrt(L)).flatten()
 
-
-
     def fit(self, buffer, buffer_state, batch_size, num_samples, seed):
 
         # Create random key
@@ -173,25 +172,25 @@ class LSTQD:
 
             # Optional: filter by agent
             obs = experience['observation']
-            p_id = experience["agent_id"]
-            o_id = 1 - p_id
+            #p_id = experience["agent_id"]
+            #o_id = 1 - p_id
             #print(p_id)
             #print('---')
             #print(o_id)
-            p_id = jnp.expand_dims(p_id, 1)
-            o_id = jnp.expand_dims(o_id, 1)
+            #p_id = jnp.expand_dims(p_id, 1)
+            #o_id = jnp.expand_dims(o_id, 1)
             p1_obs, p2_obs = self.get_p_obs(obs)
 
-            p1_obs = jnp.concatenate((p_id, p1_obs), axis=1)
-            p2_obs = jnp.concatenate((o_id, p2_obs), axis=1)
+            #p1_obs = jnp.concatenate((p_id, p1_obs), axis=1)
+            #p2_obs = jnp.concatenate((o_id, p2_obs), axis=1)
 
             actions = experience['action']
             rewards = jnp.expand_dims(experience['reward'], 1)
             next_obs = experience['next_observation']
             p1_next_obs, p2_next_obs = self.get_p_obs(next_obs)
 
-            p1_next_obs = jnp.concatenate((p_id, p1_next_obs), axis=1)
-            p2_next_obs = jnp.concatenate((o_id, p2_next_obs), axis=1)
+            #p1_next_obs = jnp.concatenate((p_id, p1_next_obs), axis=1)
+            #p2_next_obs = jnp.concatenate((o_id, p2_next_obs), axis=1)
 
             dones = experience['done']
 
