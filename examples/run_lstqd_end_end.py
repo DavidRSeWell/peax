@@ -1,6 +1,7 @@
 import hydra
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
 import numpy as np
 import random
 
@@ -10,6 +11,94 @@ from tqdm import tqdm
 from peax.fpta import LSTQD
 from peax.basis import simple_pursuer_evader_basis
 from peax.environment import PursuerEvaderEnv, discretize_action
+
+
+
+
+def run_eval(
+    env: PursuerEvaderEnv,
+    fpta: LSTQD,
+    C1: jax.Array,
+    C2: jax.Array,
+    possible_actions: List[jax.Array],
+    num_episodes: int,
+    key: jax.Array
+) -> Tuple[Dict, Dict]:
+    """
+    Evaluate two lstqd agents
+    """
+    key, reset_key = jax.random.split(key)
+    env_state, obs_dict = env.reset(reset_key)
+
+    # Lists to collect data
+    observations = []
+    actions = []
+    rewards = []
+    next_observations = []
+    dones_list = []
+    agent_ids = []  # 0 = pursuer, 1 = evader
+
+    
+    p1_reward = {"p": [], "e": []}
+    p2_reward = {"p": [], "e": []}
+    for _ in range(num_episodes):
+        for id_ in range(2): # Let both play as pursuer / evader the same number of times
+            p_r = 0.0
+            e_r = 0.0
+            for step in range(env.params.max_steps):
+
+                # Get obs for FPTA trianing not relative
+                pursuer_obs_normal = jnp.array([
+                    env_state.pursuer.position[0], env_state.pursuer.position[1],
+                    env_state.pursuer.velocity[0], env_state.pursuer.velocity[1],
+                    env_state.time / env.params.max_steps, 0.0
+                ])
+
+                evader_obs_normal = jnp.array([
+                    env_state.evader.position[0], env_state.evader.position[1],
+                    env_state.evader.velocity[0], env_state.evader.velocity[1],
+                    env_state.time / env.params.max_steps, 1.0
+                ])
+                
+                if id_ == 0:
+                    pursuer_force, _ = fpta.act(pursuer_obs_normal[None,:], evader_obs_normal[None,:], possible_actions, possible_actions, C1)
+                    _ , evader_force = fpta.act(pursuer_obs_normal[None,:], evader_obs_normal[None,:], possible_actions, possible_actions, C2)
+                else:
+                    pursuer_force, _ = fpta.act(pursuer_obs_normal[None,:], evader_obs_normal[None,:], possible_actions, possible_actions, C2)
+                    _ , evader_force = fpta.act(pursuer_obs_normal[None,:], evader_obs_normal[None,:], possible_actions, possible_actions, C1)
+
+                # Step environment
+                actions_dict = {"pursuer": pursuer_force.flatten(), "evader": evader_force.flatten()}
+                next_env_state, next_obs_dict, rewards_dict, done, info = env.step(env_state, actions_dict)
+                
+                p_r += rewards_dict["pursuer"]
+                e_r += rewards_dict["pursuer"]
+
+                next_pursuer_obs_normal = jnp.array([
+                    next_env_state.pursuer.position[0], next_env_state.pursuer.position[1],
+                    next_env_state.pursuer.velocity[0], next_env_state.pursuer.velocity[1],
+                    next_env_state.time / env.params.max_steps, 0.0
+                ])
+
+                next_evader_obs_normal = jnp.array([
+                    next_env_state.evader.position[0], next_env_state.evader.position[1],
+                    next_env_state.evader.velocity[0], next_env_state.evader.velocity[1],
+                    next_env_state.time / env.params.max_steps, 1.0
+                ])
+                       # Update state
+                env_state = next_env_state
+
+                if done:
+                    break
+            # Finished episodes
+            if id_ == 0: # p1 is pursuer
+                p1_reward["p"].append(p_r / step)
+                p2_reward["e"].append(e_r / step)
+            else:
+                p2_reward["p"].append(p_r / step)
+                p1_reward["e"].append(e_r / step)
+    
+    return p1_reward, p2_reward
 
 
 def run_selfplay_episode(
@@ -100,7 +189,7 @@ def run_selfplay_episode(
     return observations, actions, rewards, next_observations, dones_array, info
 
 
-@hydra.main(version_base=None, config_path="/home/drs4568/peax/examples/conf/", config_name="lstq_config")
+@hydra.main(version_base=None, config_path="conf", config_name="lstq_config")
 def main(cfg) -> None:
  
     """
@@ -110,7 +199,6 @@ def main(cfg) -> None:
         a: Collect Data with self play
         b: Use data to fit new basis funcs
     """
-    alpha = 0.2
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     key = jax.random.PRNGKey(cfg.seed)
@@ -136,7 +224,7 @@ def main(cfg) -> None:
 
     # Basis setup    
     basis_fn = simple_pursuer_evader_basis(
-        alpha=0.02,
+        alpha=0.2,
         num_trait=obs_dim,
         num_actions=act_dim,
     )
@@ -149,6 +237,7 @@ def main(cfg) -> None:
     lstqd = LSTQD(basis=basis_fn, num_actions=len(possible_actions))
     C = jnp.array(np.random.normal(size=(lstqd.m, lstqd.m)))
     C_old = [C]
+    evals = []
     for _ in tqdm(range(cfg.num_iters)):
         D = []  # Dataset for this iteration
         # Collect data with self-play for some number of episodes
@@ -159,8 +248,25 @@ def main(cfg) -> None:
             D.append((observations, actions, rewards, next_observations, dones))
         
         # Train LSTQD with collected data
-        C = lstqd.fit_D(D, p1_acts=possible_actions, p2_acts=possible_actions)
+        C = lstqd.fit_D(D, C, p1_acts=possible_actions, p2_acts=possible_actions)
         C_old.append(C)
+        reward_new, reward_old = run_eval(
+            env, lstqd, C, C_old[-2], possible_actions, cfg.eval_episodes, key    
+        )
+        eval_ = np.array(reward_new["p"]).mean() + np.array(reward_new["e"]).mean()
+        evals.append(eval_)
+        print(f"Iter {_}: New Reward: {eval_}, Old Reward: {np.array(reward_old['p']).mean() + np.array(reward_old['e']).mean()}")
+    
+    # Plot evals and save to disk
+    plt.plot(evals)
+    plt.xlabel("Iteration")
+    plt.ylabel("Average Reward")
+    plt.title("LSTQD Evaluation Over Iterations")
+    plt.savefig("lstqd_evaluation.png")
+    
+    np.save("C_matrices.npy", np.array(C_old))
+    np.save("evals.npy", np.array(evals))
+
 
         
 if __name__ == "__main__":

@@ -191,7 +191,7 @@ class LSTQD:
         print(b_x.max())
         return ((Q.T @ b_x) * jnp.sqrt(L)).flatten()
 
-    def fit_D(self, D: List[tuple], p1_acts, p2_acts) ->  jnp.ndarray:
+    def fit_D(self, D: List[tuple], C, p1_acts, p2_acts) ->  jnp.ndarray:
         """
         Fit value function using dataset D
         D: List of (obs, action, reward, next_obs, done)
@@ -212,7 +212,7 @@ class LSTQD:
 
             p1_next_obs, p2_next_obs = self.get_p_obs(next_obs)
             #act_ = jax.vmap(self.act, in_axes=(0,0,None,None,None))
-            next_act = jnp.array([self.act(p1_next_obs[i][None,:], p2_next_obs[i][None,:], p1_acts, p2_acts, self.C) for i in range(p1_next_obs.shape[0])])
+            next_act = jnp.array([self.act(p1_next_obs[i][None,:], p2_next_obs[i][None,:], p1_acts, p2_acts, C) for i in range(p1_next_obs.shape[0])])
             next_act = next_act.squeeze()
 
             p1_next_obs = jnp.concatenate((p1_next_obs, next_act[:,0]), axis=1)
