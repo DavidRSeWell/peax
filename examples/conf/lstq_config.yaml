@@ -1,0 +1,18 @@
+# Experiment settings
+seed: 1
+num_iters: 100
+episodes_per_iter: 1
+steps_per_episode: 25
+discount_factor: 0.95
+eval_episodes: 10
+
+# Environment settings
+boundary_type: square  # Options: square, circle, triangle
+boundary_size: 10.0
+max_steps: 200
+capture_radius: 0.5
+num_actions_per_dim: 5  # Total actions = this^2 (e.g., 5x5 = 25 actions)
+
+# Reward shaping (to discourage wall-sitting)
+wall_penalty_coef: 0.01  # Penalty for being near walls
+velocity_reward_coef: 0.005  # Reward for movement

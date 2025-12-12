@@ -3,6 +3,7 @@
 from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
+import numpy as np
 from chex import Array, PRNGKey
 
 from peax.types import AgentState, EnvState, EnvParams, Observation
@@ -34,6 +35,28 @@ def estimate_max_velocity(max_force: float, mass: float = 1.0, dt: float = 0.1, 
     # Assume continuous acceleration for ~1/10th of episode
     acceleration_duration = (max_steps / 10) * dt
     return acceleration * acceleration_duration
+
+def discretize_action(action_idx: int, num_actions_per_dim: int, max_force: float) -> jnp.ndarray:
+    """Convert discrete action index to continuous force.
+
+    Args:
+        action_idx: Discrete action index
+        num_actions_per_dim: Number of discrete actions per dimension
+        max_force: Maximum force magnitude
+
+    Returns:
+        2D force vector
+    """
+    # Convert 1D index to 2D grid coordinates
+    fx_idx = action_idx // num_actions_per_dim
+    fy_idx = action_idx % num_actions_per_dim
+
+    # Map to force values
+    force_values = np.linspace(-max_force, max_force, num_actions_per_dim)
+    fx = force_values[fx_idx]
+    fy = force_values[fy_idx]
+
+    return jnp.array([fx, fy])
 
 
 class PursuerEvaderEnv:
