@@ -2,6 +2,8 @@ import hydra
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
 import random
 
@@ -99,6 +101,164 @@ def run_eval(
                 p1_reward["e"].append(e_r / (step + 1))
     
     return p1_reward, p2_reward
+
+
+def render_episode_to_gif(
+    env: PursuerEvaderEnv,
+    fpta: LSTQD,
+    C: jax.Array,
+    possible_actions: List[jax.Array],
+    key: jax.Array,
+    filename: str,
+    max_steps: int = 200,
+    num_episodes: int = 5
+) -> Dict:
+    """Render episodes and save as GIF.
+
+    Args:
+        env: PursuerEvaderEnv environment
+        fpta: LSTQD model
+        C: C matrix for action selection
+        possible_actions: List of possible discrete actions
+        key: JAX random key
+        filename: Output GIF filename
+        max_steps: Maximum steps to render
+        num_episodes: Number of episodes to render in sequence
+
+    Returns:
+        Dict with episode info (reward, captured, timeout, length)
+    """
+    states = []
+    total_reward = 0.0
+    last_info = {}
+
+    for _ in range(num_episodes):
+        # Run episode and collect states
+        key, reset_key = jax.random.split(key)
+        env_state, obs_dict = env.reset(reset_key)
+        states.append(env_state)
+
+        episode_reward = 0.0
+
+        for step in range(max_steps):
+            # Get observations for FPTA (not relative)
+            pursuer_obs_normal = jnp.array([
+                env_state.pursuer.position[0], env_state.pursuer.position[1],
+                env_state.pursuer.velocity[0], env_state.pursuer.velocity[1],
+                env_state.time / env.params.max_steps, 0.0
+            ])
+
+            evader_obs_normal = jnp.array([
+                env_state.evader.position[0], env_state.evader.position[1],
+                env_state.evader.velocity[0], env_state.evader.velocity[1],
+                env_state.time / env.params.max_steps, 1.0
+            ])
+
+            # Greedy actions using LSTQD model and C matrix
+            pursuer_force, evader_force = fpta.act(
+                pursuer_obs_normal[None, :],
+                evader_obs_normal[None, :],
+                possible_actions,
+                possible_actions,
+                C
+            )
+
+            # Step environment
+            actions_dict = {"pursuer": pursuer_force.flatten(), "evader": evader_force.flatten()}
+            env_state, obs_dict, rewards_dict, done, info = env.step(env_state, actions_dict)
+
+            states.append(env_state)
+            episode_reward += rewards_dict["pursuer"]
+
+            if done:
+                last_info = info
+                break
+
+        total_reward += episode_reward
+
+    # Create animation
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    def init():
+        ax.clear()
+        ax.set_xlim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_ylim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_aspect('equal')
+        return []
+
+    def update(frame):
+        ax.clear()
+        ax.set_xlim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_ylim(-env.params.boundary_size * 0.6, env.params.boundary_size * 0.6)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+
+        state = states[frame]
+
+        # Draw boundary
+        boundary_type = type(env.boundary).__name__
+        if "Square" in boundary_type:
+            size = env.params.boundary_size / 2
+            rect = patches.Rectangle(
+                (-size, -size), size * 2, size * 2,
+                linewidth=2, edgecolor='black', facecolor='none'
+            )
+            ax.add_patch(rect)
+        elif "Circle" in boundary_type:
+            circle = patches.Circle(
+                (0, 0), env.params.boundary_size / 2,
+                linewidth=2, edgecolor='black', facecolor='none'
+            )
+            ax.add_patch(circle)
+
+        # Draw agents
+        pursuer_pos = state.pursuer.position
+        evader_pos = state.evader.position
+
+        # Pursuer (red)
+        ax.plot(pursuer_pos[0], pursuer_pos[1], 'ro', markersize=12, label='Pursuer')
+        # Draw velocity arrow
+        if np.linalg.norm(state.pursuer.velocity) > 0.1:
+            ax.arrow(pursuer_pos[0], pursuer_pos[1],
+                    state.pursuer.velocity[0] * 0.5, state.pursuer.velocity[1] * 0.5,
+                    head_width=0.3, head_length=0.2, fc='red', ec='red', alpha=0.6)
+
+        # Evader (blue)
+        ax.plot(evader_pos[0], evader_pos[1], 'bo', markersize=12, label='Evader')
+        # Draw velocity arrow
+        if np.linalg.norm(state.evader.velocity) > 0.1:
+            ax.arrow(evader_pos[0], evader_pos[1],
+                    state.evader.velocity[0] * 0.5, state.evader.velocity[1] * 0.5,
+                    head_width=0.3, head_length=0.2, fc='blue', ec='blue', alpha=0.6)
+
+        # Draw capture radius
+        capture_circle = patches.Circle(
+            pursuer_pos, env.params.capture_radius,
+            linewidth=1, edgecolor='red', facecolor='red', alpha=0.2
+        )
+        ax.add_patch(capture_circle)
+
+        # Title with info
+        time_remaining = env.params.max_steps - state.time
+        ax.set_title(f'Step {state.time}/{env.params.max_steps} | Time Remaining: {time_remaining}')
+        ax.legend(loc='upper right')
+
+        return []
+
+    anim = FuncAnimation(fig, update, init_func=init, frames=len(states),
+                        interval=100, blit=True, repeat=True)
+
+    # Save as GIF
+    writer = PillowWriter(fps=10)
+    anim.save(filename, writer=writer)
+    plt.close(fig)
+
+    return {
+        "reward": total_reward / num_episodes,
+        "captured": last_info.get("captured", False),
+        "timeout": last_info.get("timeout", False),
+        "length": len(states) - num_episodes
+    }
 
 
 def run_selfplay_episode(
