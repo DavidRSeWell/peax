@@ -118,9 +118,10 @@ class JointQNetwork(nn.Module):
         Returns:
             Q-values of shape [batch, pursuer_actions, evader_actions]
         """
-        x = nn.Dense(256)(x)
-        x = nn.relu(x)
-        x = nn.Dense(256)(x)
+        # Smaller network to match cleanrl_dqn architecture more closely
+        # cleanrl uses 120 → 84 for output of 9
+        # We use 128 → 128 for output of 81 (9x larger)
+        x = nn.Dense(128)(x)
         x = nn.relu(x)
         x = nn.Dense(128)(x)
         x = nn.relu(x)
@@ -175,22 +176,49 @@ class ReplayBuffer:
         )
 
 
+def estimate_max_velocity(max_force: float, mass: float = 1.0, dt: float = 0.1, max_steps: int = 200) -> float:
+    """Estimate maximum velocity an agent can reach.
+
+    Assumes agent accelerates continuously for a fraction of the episode.
+    Rule of thumb: agents accelerate for ~max_steps/10 steps in practice.
+
+    Args:
+        max_force: Maximum force magnitude
+        mass: Agent mass
+        dt: Timestep duration
+        max_steps: Maximum episode steps
+
+    Returns:
+        Estimated maximum velocity
+    """
+    acceleration = max_force / mass
+    # Assume continuous acceleration for ~1/10th of episode
+    acceleration_duration = (max_steps / 10) * dt
+    return acceleration * acceleration_duration
+
+
 def get_global_state(env_state, env: PursuerEvaderEnv) -> np.ndarray:
-    """Convert environment state to global state vector.
+    """Convert environment state to normalized global state vector.
 
     Args:
         env_state: Environment state
         env: Environment instance
 
     Returns:
-        Global state: [pursuer_pos, pursuer_vel, evader_pos, evader_vel, time]
+        Normalized global state: [pursuer_pos, pursuer_vel, evader_pos, evader_vel, time]
+        All values normalized to roughly [-1, 1] for better neural network training.
     """
+    # Estimate max velocity from physics
+    max_velocity = estimate_max_velocity(env.params.max_force)
+    # Max position is half the boundary size (positions are centered at 0)
+    max_position = env.params.boundary_size / 2
+
     return np.concatenate([
-        np.array(env_state.pursuer.position),
-        np.array(env_state.pursuer.velocity),
-        np.array(env_state.evader.position),
-        np.array(env_state.evader.velocity),
-        np.array([env_state.time / env.params.max_steps])
+        np.array(env_state.pursuer.position) / max_position,      # Normalize to ~[-1, 1]
+        np.array(env_state.pursuer.velocity) / max_velocity,      # Normalize to ~[-1, 1]
+        np.array(env_state.evader.position) / max_position,       # Normalize to ~[-1, 1]
+        np.array(env_state.evader.velocity) / max_velocity,       # Normalize to ~[-1, 1]
+        np.array([env_state.time / env.params.max_steps])         # Already in [0, 1]
     ])
 
 
