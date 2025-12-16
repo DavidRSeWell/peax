@@ -201,7 +201,7 @@ class LSTQD:
         b = jnp.zeros((self.m**2, 1))
         M = 0.0
 
-        for (obs, action, reward, next_obs, done) in tqdm(D):
+        for (obs, action, reward, next_obs, done) in D:
 
             p1_obs, p2_obs = self.get_p_obs(obs)
             p1_act = action[:, 0]
@@ -243,6 +243,78 @@ class LSTQD:
 
         return C
     
+    def fit_Q(self, q_parms, buffer, buffer_state, batch_size, num_samples, seed, tranform_action: Callable = lambda x: x):
+
+        # Create random key
+        key = jax.random.PRNGKey(seed)
+        A = jnp.zeros((self.m**2, self.m**2))
+        b = jnp.zeros((self.m**2, 1))
+        M = batch_size*num_samples
+
+        tds = []
+        for iter_ in tqdm(range(num_samples)):
+            # Note: Flashbax item buffer samples are in 'experience' field
+            batch = buffer.sample(buffer_state, key)
+
+            experience = batch.experience
+
+            # Optional: filter by agent
+            obs = experience['observation']
+            p1_obs, p2_obs = self.get_p_obs(obs)
+            actions = experience['action']
+            rewards = jnp.expand_dims(experience['reward'], 1)
+            next_obs = experience['next_observation']
+            p1_next_obs, p2_next_obs = self.get_p_obs(next_obs)
+            dones = experience['done']
+           
+            B_xy = self.get_players_B(p1_obs, p2_obs) # m x |S||A|
+            B_yx = self.get_players_B(p2_obs, p1_obs) # m x |S||A|
+            B_next_xy = self.get_players_B(p1_next_obs, p2_next_obs)
+            B_next_yx = self.get_players_B(p2_next_obs, p1_next_obs)
+            
+            A_ = B_xy @ (B_xy - 0.99*B_next_xy).T
+            b_ = B_xy @ rewards
+            A += A_
+            b += b_
+
+            A_ = B_yx @ (B_yx - 0.99*B_next_yx).T
+            b_ = B_yx @ -rewards
+
+            A += A_
+            b += b_
+
+            A_current = A / ((iter_ + 1)*num_samples)
+            b_current = b / ((iter_ + 1)*num_samples)
+            C = jnp.linalg.pinv(A_current) @ b_current
+
+            B_x = self.basis_eval(p1_obs)
+            B_y = self.basis_eval(p2_obs)
+            B_next_x = self.basis_eval(p1_next_obs)
+            B_next_y = self.basis_eval(p2_next_obs)
+            pred_ = (B_x @ C.reshape((self.m, self.m)) @ B_y.T).mean(axis=1)
+            pred_next_ = (B_next_x @ C.reshape((self.m, self.m)) @ B_next_y.T).mean(axis=1)
+
+            # TD Error
+            td_error = (pred_ - (rewards.flatten() + pred_next_)).mean() 
+            tds.append(td_error)
+
+
+        A /= M
+        b /= M
+        
+        print("----A---")
+        print(tabulate(A))
+        print("----b----")
+        print(tabulate(b))
+
+        C = jnp.linalg.inv(A) @ b
+        C = C.reshape((self.m , self.m))
+        
+        print("-----C----")
+        print(tabulate(C))
+
+        return C, tds
+
     def fit(self, buffer, buffer_state, batch_size, num_samples, seed, tranform_action: Callable = lambda x: x):
 
         # Create random key
@@ -285,7 +357,7 @@ class LSTQD:
 
             A_current = A / ((iter_ + 1)*num_samples)
             b_current = b / ((iter_ + 1)*num_samples)
-            C = jnp.linalg.inv(A_current) @ b_current
+            C = jnp.linalg.pinv(A_current) @ b_current
 
             B_x = self.basis_eval(p1_obs)
             B_y = self.basis_eval(p2_obs)

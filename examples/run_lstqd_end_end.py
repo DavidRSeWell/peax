@@ -71,8 +71,8 @@ def run_eval(
                 actions_dict = {"pursuer": pursuer_force.flatten(), "evader": evader_force.flatten()}
                 next_env_state, next_obs_dict, rewards_dict, done, info = env.step(env_state, actions_dict)
                 
-                p_r += rewards_dict["pursuer"]
-                e_r += rewards_dict["pursuer"]
+                p_r += rewards_dict["pursuer"].item()
+                e_r += rewards_dict["pursuer"].item()
 
                 next_pursuer_obs_normal = jnp.array([
                     next_env_state.pursuer.position[0], next_env_state.pursuer.position[1],
@@ -92,11 +92,11 @@ def run_eval(
                     break
             # Finished episodes
             if id_ == 0: # p1 is pursuer
-                p1_reward["p"].append(p_r / step)
-                p2_reward["e"].append(e_r / step)
+                p1_reward["p"].append(p_r / (step + 1))
+                p2_reward["e"].append(e_r / (step + 1))
             else:
-                p2_reward["p"].append(p_r / step)
-                p1_reward["e"].append(e_r / step)
+                p2_reward["p"].append(p_r / (step + 1))
+                p1_reward["e"].append(e_r / (step + 1))
     
     return p1_reward, p2_reward
 
@@ -224,7 +224,7 @@ def main(cfg) -> None:
 
     # Basis setup    
     basis_fn = simple_pursuer_evader_basis(
-        alpha=0.2,
+        alpha=0.02,
         num_trait=obs_dim,
         num_actions=act_dim,
     )
@@ -235,10 +235,13 @@ def main(cfg) -> None:
 
     # LSTQD setup
     lstqd = LSTQD(basis=basis_fn, num_actions=len(possible_actions))
-    C = jnp.array(np.random.normal(size=(lstqd.m, lstqd.m)))
+    #C = jnp.array(np.random.normal(size=(lstqd.m, lstqd.m)))
+    # Load first C matrix from disk
+    C = jnp.array(np.load("/home/drs4568/peax/C_15_old.npy"))
+    #C = jnp.array(np.load(cfg.init_C_path))[-1]
     C_old = [C]
     evals = []
-    for _ in tqdm(range(cfg.num_iters)):
+    for iter_ in tqdm(range(cfg.num_iters)):
         D = []  # Dataset for this iteration
         # Collect data with self-play for some number of episodes
         for _ in tqdm(range(cfg.episodes_per_iter)):
@@ -250,12 +253,15 @@ def main(cfg) -> None:
         # Train LSTQD with collected data
         C = lstqd.fit_D(D, C, p1_acts=possible_actions, p2_acts=possible_actions)
         C_old.append(C)
-        reward_new, reward_old = run_eval(
-            env, lstqd, C, C_old[-2], possible_actions, cfg.eval_episodes, key    
-        )
-        eval_ = np.array(reward_new["p"]).mean() + np.array(reward_new["e"]).mean()
-        evals.append(eval_)
-        print(f"Iter {_}: New Reward: {eval_}, Old Reward: {np.array(reward_old['p']).mean() + np.array(reward_old['e']).mean()}")
+
+        if iter_ % cfg.eval_every == 0:
+            reward_new, reward_old = run_eval(
+                env, lstqd, C, C_old[-2], possible_actions, cfg.eval_episodes, key    
+            )
+            eval_ = (np.array(reward_new["p"]).mean() + np.array(reward_new["e"]).mean()) / 2.0
+            evals.append(eval_)
+            np.save("C_{iter}.npy".format(iter=iter_), np.array(C))
+            print(f"Iter {_}: Reward: {eval_}")
     
     # Plot evals and save to disk
     plt.plot(evals)
