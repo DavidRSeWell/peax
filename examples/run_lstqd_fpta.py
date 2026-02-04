@@ -4,10 +4,10 @@ import jax
 import jax.numpy as jnp
 
 from peax.fpta import LSTQD, load_buffer_data
-from search_basis import generate_fourier_basis
+from search_basis import generate_fourier_basis_with_action_linear
 
-basis = generate_fourier_basis(obs_dim=6, max_freq=3)
-print(f"Fourier basis (max_freq=3): m={len(basis)}")
+basis = generate_fourier_basis_with_action_linear(obs_dim=8, max_freq=3, action_indices=[6, 7])
+print(f"Fourier basis with action linear (obs_dim=8, max_freq=3): m={len(basis)}")
 
 def plot_disc_game(Y_1, Y_2, c_1, c_2, grey, title, plot_grey=True):
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -238,15 +238,18 @@ def compute_metrics(lstq, C, C_raw, L, Q, buffer, buffer_state, batch_size, gamm
 
 
 def main():
-    data_dir = "/home/drs4568/peax/examples/"
+    data_dir = "/home/drs4568/peax/examples/data/"
 
     seed = 0
     batch_size = 10000
     num_samples = 10
 
-    buffer, buffer_state, meta_data = load_buffer_data(data_dir, batch_size=batch_size)
+    # num_actions_per_dim must match what the DQN used during data collection
+    num_actions_per_dim = 3
 
-    num_actions_per_dim = 5
+    buffer, buffer_state, meta_data = load_buffer_data(
+        data_dir, batch_size=batch_size, include_actions=True,
+        num_actions_per_dim=num_actions_per_dim)
 
     lstq = LSTQD(basis, num_actions=num_actions_per_dim**2)
 

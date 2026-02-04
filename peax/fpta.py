@@ -18,50 +18,128 @@ from typing import Callable, List
 def _abs_to_relative(obs, boundary_size=10.0, max_velocity=12.0):
     """Convert absolute observations to normalized relative observations.
 
-    Input layout per observation (..., 12):
-        [p1_pos_x, p1_pos_y, p1_vel_x, p1_vel_y, p1_time, p1_id,
-         p2_pos_x, p2_pos_y, p2_vel_x, p2_vel_y, p2_time, p2_id]
+    Handles both 12D (state-only) and 16D (state+action) observations.
 
-    Output layout per observation (..., 12):
-        Player 1 view (first 6):
-            [rel_pos_x, rel_pos_y, rel_vel_x, rel_vel_y, own_vel_x, own_vel_y]
-        Player 2 view (last 6):
-            [-rel_pos_x, -rel_pos_y, -rel_vel_x, -rel_vel_y, own_vel_x, own_vel_y]
+    12D input layout:
+        [p1_pos(2), p1_vel(2), p1_time, p1_id,
+         p2_pos(2), p2_vel(2), p2_time, p2_id]
+    12D output layout:
+        [rel_pos(2), rel_vel(2), own_vel(2),
+         -rel_pos(2), -rel_vel(2), own_vel(2)]
 
-    Where rel = p2 - p1 for player 1's view, and p1 - p2 for player 2's view.
-    This ensures the natural skew-symmetry: swapping players negates the
-    relative terms.
+    16D input layout (with actions):
+        [p1_pos(2), p1_vel(2), p1_time, p1_id, p1_action(2),
+         p2_pos(2), p2_vel(2), p2_time, p2_id, p2_action(2)]
+    16D output layout:
+        [rel_pos(2), rel_vel(2), own_vel(2), own_action(2),
+         -rel_pos(2), -rel_vel(2), own_vel(2), own_action(2)]
 
-    All outputs are normalized to ~[-1, 1]:
-        rel_pos  -> / boundary_size   (max relative distance)
-        rel_vel  -> / (2 * max_velocity)  (max relative speed)
-        own_vel  -> / max_velocity
+    Normalization: rel_pos / boundary_size, rel_vel / (2*max_vel),
+    own_vel / max_vel. Actions are assumed already normalized to [-1, 1].
     """
+    obs_dim = obs.shape[-1]
+    has_actions = (obs_dim == 16)
+    half = obs_dim // 2  # 6 or 8
+
     # Extract absolute features
     p1_pos = obs[..., 0:2]
     p1_vel = obs[..., 2:4]
-    p2_pos = obs[..., 6:8]
-    p2_vel = obs[..., 8:10]
+    p2_pos = obs[..., half:half+2]
+    p2_vel = obs[..., half+2:half+4]
 
     # Relative features (from p1's perspective)
-    rel_pos = p2_pos - p1_pos    # relative position
-    rel_vel = p2_vel - p1_vel    # relative velocity
+    rel_pos = p2_pos - p1_pos
+    rel_vel = p2_vel - p1_vel
 
     # Normalize
-    rel_pos_norm = rel_pos / boundary_size          # max relative dist = boundary_size
-    rel_vel_norm = rel_vel / (2.0 * max_velocity)   # max relative speed = 2 * max_vel
+    rel_pos_norm = rel_pos / boundary_size
+    rel_vel_norm = rel_vel / (2.0 * max_velocity)
     p1_vel_norm = p1_vel / max_velocity
     p2_vel_norm = p2_vel / max_velocity
 
-    # Assemble: player 1 view and player 2 view
-    p1_view = jnp.concatenate([rel_pos_norm, rel_vel_norm, p1_vel_norm], axis=-1)
-    p2_view = jnp.concatenate([-rel_pos_norm, -rel_vel_norm, p2_vel_norm], axis=-1)
+    # Assemble views
+    p1_parts = [rel_pos_norm, rel_vel_norm, p1_vel_norm]
+    p2_parts = [-rel_pos_norm, -rel_vel_norm, p2_vel_norm]
+
+    if has_actions:
+        # Actions are at indices 6:8 and 14:16, already normalized
+        p1_action = obs[..., 6:8]
+        p2_action = obs[..., 14:16]
+        p1_parts.append(p1_action)
+        p2_parts.append(p2_action)
+
+    p1_view = jnp.concatenate(p1_parts, axis=-1)
+    p2_view = jnp.concatenate(p2_parts, axis=-1)
 
     return jnp.concatenate([p1_view, p2_view], axis=-1)
 
 
+def _augment_with_actions(buffer_state, num_actions_per_dim=5):
+    """Augment observations with both players' action vectors.
+
+    The buffer stores transitions in alternating order:
+        [pursuer_step_0, evader_step_0, pursuer_step_1, evader_step_1, ...]
+    Each transition has only the acting player's action. This function
+    reconstructs the opponent's action from the paired transition.
+
+    Observations go from 12D to 16D:
+        [p1_state(6), p1_action(2), p2_state(6), p2_action(2)]
+    Actions are normalized to [-1, 1] by dividing by max force magnitude.
+
+    Next-observations are augmented with the next timestep's actions.
+    At terminal transitions (done=1), next-action values are irrelevant
+    since they get multiplied by (1 - done) = 0 during fitting.
+    """
+    exp = buffer_state.experience
+    obs = exp['observation']       # (1, N, 12)
+    next_obs = exp['next_observation']  # (1, N, 12)
+    actions = exp['action']        # (1, N) discrete indices
+
+    N = obs.shape[1]
+
+    # Build action lookup table: index -> normalized 2D force in [-1, 1]
+    forces_1d = jnp.linspace(-1.0, 1.0, num_actions_per_dim)
+    # Use 'ij' indexing to match discretize_action: fx_idx = k // N, fy_idx = k % N
+    fx, fy = jnp.meshgrid(forces_1d, forces_1d, indexing='ij')
+    action_table = jnp.stack([fx.ravel(), fy.ravel()], axis=-1)  # (num_actions, 2)
+
+    # Own action is stored in each transition
+    own_vecs = action_table[actions[0]]  # (N, 2)
+
+    # Opponent action: even index i -> opp at i+1, odd index i -> opp at i-1
+    idx = jnp.arange(N)
+    opp_idx = jnp.where(idx % 2 == 0, idx + 1, idx - 1)
+    opp_idx = jnp.clip(opp_idx, 0, N - 1)
+    opp_vecs = action_table[actions[0, opp_idx]]  # (N, 2)
+
+    # Next-step actions (one timestep forward):
+    # Even i (pursuer step k): next_own = actions[i+2], next_opp = actions[i+3]
+    # Odd  i (evader  step k): next_own = actions[i+2], next_opp = actions[i+1]
+    next_own_idx = jnp.clip(idx + 2, 0, N - 1)
+    next_opp_idx = jnp.where(idx % 2 == 0, idx + 3, idx + 1)
+    next_opp_idx = jnp.clip(next_opp_idx, 0, N - 1)
+
+    next_own_vecs = action_table[actions[0, next_own_idx]]  # (N, 2)
+    next_opp_vecs = action_table[actions[0, next_opp_idx]]  # (N, 2)
+
+    # Augment: [p1_state(6), p1_action(2), p2_state(6), p2_action(2)] = 16D
+    new_obs = jnp.concatenate([
+        obs[0, :, :6], own_vecs,
+        obs[0, :, 6:], opp_vecs,
+    ], axis=-1)[None, ...]  # (1, N, 16)
+
+    new_next_obs = jnp.concatenate([
+        next_obs[0, :, :6], next_own_vecs,
+        next_obs[0, :, 6:], next_opp_vecs,
+    ], axis=-1)[None, ...]  # (1, N, 16)
+
+    new_exp = {**exp, 'observation': new_obs, 'next_observation': new_next_obs}
+    return buffer_state.replace(experience=new_exp)
+
+
 def load_buffer_data(data_dir: str, batch_size: int, normalize: bool = True,
-                     boundary_size: float = 10.0, max_velocity: float = 12.0):
+                     boundary_size: float = 10.0, max_velocity: float = 12.0,
+                     include_actions: bool = False, num_actions_per_dim: int = 5):
     """Load self-play data from saved buffer.
 
     Args:
@@ -69,6 +147,10 @@ def load_buffer_data(data_dir: str, batch_size: int, normalize: bool = True,
         normalize: If True, convert absolute obs to normalized relative obs
         boundary_size: Environment boundary size (for normalization)
         max_velocity: Approximate max velocity (for normalization)
+        include_actions: If True, augment observations with normalized action
+            vectors (12D -> 16D, per-player 6D -> 8D)
+        num_actions_per_dim: Number of discrete actions per dimension (for
+            action index -> force vector conversion)
 
     Returns:
         Tuple of (buffer, buffer_state, metadata)
@@ -98,27 +180,40 @@ def load_buffer_data(data_dir: str, batch_size: int, normalize: bool = True,
     with open(data_path / "buffer_state.pkl", 'rb') as f:
         buffer_state = pickle.load(f)
 
+    # Augment observations with action vectors (must happen BEFORE relative
+    # transform since it uses the raw 12D layout with absolute positions)
+    if include_actions:
+        print(f"\nAugmenting observations with action vectors "
+              f"(num_actions_per_dim={num_actions_per_dim})...")
+        buffer_state = _augment_with_actions(buffer_state, num_actions_per_dim)
+        print("  Observations augmented: 12D -> 16D (actions normalized to [-1, 1])")
+
     # Convert to relative + normalized observations
     if normalize:
-        print(f"\nConverting to relative observations "
+        print(f"Converting to relative observations "
               f"(boundary_size={boundary_size}, max_velocity={max_velocity})...")
         exp = buffer_state.experience
         rel_obs = _abs_to_relative(exp['observation'], boundary_size, max_velocity)
         rel_next = _abs_to_relative(exp['next_observation'], boundary_size, max_velocity)
         new_exp = {**exp, 'observation': rel_obs, 'next_observation': rel_next}
         buffer_state = buffer_state.replace(experience=new_exp)
-        print("  Layout per player: [rel_pos_x, rel_pos_y, rel_vel_x, rel_vel_y, own_vel_x, own_vel_y]")
+        per_player = 8 if include_actions else 6
+        features = "rel_pos(2), rel_vel(2), own_vel(2)"
+        if include_actions:
+            features += ", action(2)"
+        print(f"  Layout per player ({per_player}D): [{features}]")
         print("  All features normalized to ~[-1, 1]")
 
     # Recreate buffer with same configuration
     estimated_size = metadata['total_transitions']
+    obs_shape = buffer_state.experience['observation'].shape[2:]
 
     # Create example transition for buffer initialization
     example_transition = {
-        "observation": jnp.zeros(metadata['buffer_shape']['observation'], dtype=jnp.float32),
+        "observation": jnp.zeros(obs_shape, dtype=jnp.float32),
         "action": jnp.array(0, dtype=jnp.int32),
         "reward": jnp.array(0.0, dtype=jnp.float32),
-        "next_observation": jnp.zeros(metadata['buffer_shape']['next_observation'], dtype=jnp.float32),
+        "next_observation": jnp.zeros(obs_shape, dtype=jnp.float32),
         "done": jnp.array(0.0, dtype=jnp.float32),
         "agent_id": jnp.array(0, dtype=jnp.int32),
     }
@@ -191,20 +286,10 @@ class LSTQD:
 
 
     def get_p_obs(self, obs):
-        """
-        Break up obs by player
-        """
-        '''
-        p1_mask = jnp.ones(obs.shape[1], dtype=jnp.int2)
-        p1_mask = p1_mask.at[4:-1].set(0)
-
-        p2_mask = jnp.ones(obs.shape[1], dtype=jnp.int2)
-        p2_mask = p2_mask.at[:4].set(0)
-
-        print(p1_mask)
-        '''
-
-        return obs[:, :6], obs[:, 6:]
+        """Break up obs by player. Splits at midpoint to handle both
+        12D (state-only) and 16D (state+action) observations."""
+        half = obs.shape[1] // 2
+        return obs[:, :half], obs[:, half:]
 
     def basis_eval(self, obs):
 

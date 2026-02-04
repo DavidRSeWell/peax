@@ -79,6 +79,36 @@ def generate_fourier_basis(obs_dim: int, max_freq: int):
     return basis
 
 
+def generate_fourier_basis_with_action_linear(obs_dim: int, max_freq: int, action_indices: list = None):
+    """Fourier basis with linear terms for action dimensions.
+
+    The standard fourier basis can't distinguish between action values at -1 and +1
+    because cos(k*pi*(-1)) = cos(k*pi*1). Adding linear terms fixes this.
+
+    Args:
+        obs_dim: Total observation dimension (including actions)
+        max_freq: Max frequency for fourier terms
+        action_indices: Indices of action dimensions to add linear terms for.
+                       Default is [obs_dim-2, obs_dim-1] (last 2 dims).
+    """
+    if action_indices is None:
+        action_indices = [obs_dim - 2, obs_dim - 1]
+
+    basis = [lambda x: 1.0]
+
+    # Fourier terms for all dimensions
+    for k in range(1, max_freq + 1):
+        for i in range(obs_dim):
+            basis.append(lambda x, _i=i, _k=k: jnp.cos(jnp.pi * _k * x[_i]))
+            basis.append(lambda x, _i=i, _k=k: jnp.sin(jnp.pi * _k * x[_i]))
+
+    # Linear terms for action dimensions (to break symmetry)
+    for i in action_indices:
+        basis.append(lambda x, _i=i: x[_i])
+
+    return basis
+
+
 def generate_rbf_basis(n_centers: int, centers: jnp.ndarray, sigma: float):
     """RBF basis: exp(-||x - c_j||^2 / (2*sigma^2)) for each center c_j."""
     basis = []
