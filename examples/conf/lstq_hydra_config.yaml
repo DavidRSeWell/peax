@@ -1,0 +1,39 @@
+# LSTQD-FPTA Hydra Configuration
+# Usage: python examples/run_lstqd_hydra.py
+# Override: python examples/run_lstqd_hydra.py basis_type=chebyshev max_degree=4
+
+# --- Experiment ---
+seed: 0
+data_dir: "/home/drs4568/peax/examples/"
+
+# --- LSTQD fitting ---
+batch_size: 10000
+num_samples: 10
+gamma: 0.95
+num_actions_per_dim: 5
+
+# --- Basis selection ---
+# Options: exponential, polynomial, chebyshev, fourier,
+#          rbf, poly_distance, mixed_poly_fourier
+basis_type: exponential
+obs_dim: 6
+
+# Polynomial / Chebyshev parameters
+max_degree: 2
+cross_terms: false
+
+# Fourier parameters
+max_freq: 1
+
+# RBF parameters
+n_centers: 10
+rbf_sigma: 0.0       # 0.0 = auto-estimate from data
+rbf_center_seed: 7
+rbf_subsample: 500
+
+# Custom exponential parameters
+exp_alpha: 0.1
+
+# --- Plotting ---
+save_plots: true
+plot_disc_games: true

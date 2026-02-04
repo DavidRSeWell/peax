@@ -82,7 +82,7 @@ def select_minimax_actions(
     pursuer_force = discretize_action(pursuer_action_idx, num_actions_per_dim, max_force)
     evader_force = discretize_action(evader_action_idx, num_actions_per_dim, max_force)
 
-    return pursuer_action_idx, evader_action_idx, pursuer_force, evader_force
+    return pursuer_action_idx, evader_action_idx, pursuer_force, evader_force, q_matrix
 
 
 def run_episode(
@@ -114,13 +114,14 @@ def run_episode(
     rewards = []
     next_states = []
     dones_list = []
+    q_matrix_list = []
 
     for step in range(env.params.max_steps):
         # Get normalized global state
         global_state = get_global_state(env_state, env)
 
         # Select actions using minimax strategy
-        pursuer_action_idx, evader_action_idx, pursuer_force, evader_force = select_minimax_actions(
+        pursuer_action_idx, evader_action_idx, pursuer_force, evader_force, q_matrix = select_minimax_actions(
             q_network, params, global_state, num_actions_per_dim, env.params.max_force
         )
 
@@ -133,6 +134,7 @@ def run_episode(
 
         # Store joint transition
         states.append(global_state)
+        q_matrix_list.append(q_matrix)
         pursuer_actions.append(pursuer_action_idx)
         evader_actions.append(evader_action_idx)
         rewards.append(rewards_dict["pursuer"])  # Zero-sum: pursuer's perspective
@@ -148,13 +150,14 @@ def run_episode(
 
     # Convert to JAX arrays
     states = jnp.array(states, dtype=jnp.float32)
+    q_matrix_list = jnp.array(q_matrix_list, dtype=jnp.float32)
     pursuer_actions = jnp.array(pursuer_actions, dtype=jnp.int32)
     evader_actions = jnp.array(evader_actions, dtype=jnp.int32)
     rewards = jnp.array(rewards, dtype=jnp.float32)
     next_states = jnp.array(next_states, dtype=jnp.float32)
     dones_array = jnp.array(dones_list, dtype=jnp.float32)
 
-    return states, pursuer_actions, evader_actions, rewards, next_states, dones_array, info
+    return states, q_matrix_list,pursuer_actions, evader_actions, rewards, next_states, dones_array, info
 
 
 def collect_minimax_data(
@@ -328,7 +331,7 @@ def main():
         "--checkpoint",
         type=str,
         required=False,
-        default="minimax_checkpoint_step_500.pkl",
+        default="/home/drs4568/peax/minimax_checkpoint_step_490000.pkl",
         help="Path to minimax-Q agent checkpoint (.pkl file)"
     )
     parser.add_argument(

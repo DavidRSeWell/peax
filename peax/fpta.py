@@ -14,11 +14,61 @@ from tabulate import tabulate
 from tqdm import tqdm
 from typing import Callable, List
 
-def load_buffer_data(data_dir: str, batch_size: int):
+
+def _abs_to_relative(obs, boundary_size=10.0, max_velocity=12.0):
+    """Convert absolute observations to normalized relative observations.
+
+    Input layout per observation (..., 12):
+        [p1_pos_x, p1_pos_y, p1_vel_x, p1_vel_y, p1_time, p1_id,
+         p2_pos_x, p2_pos_y, p2_vel_x, p2_vel_y, p2_time, p2_id]
+
+    Output layout per observation (..., 12):
+        Player 1 view (first 6):
+            [rel_pos_x, rel_pos_y, rel_vel_x, rel_vel_y, own_vel_x, own_vel_y]
+        Player 2 view (last 6):
+            [-rel_pos_x, -rel_pos_y, -rel_vel_x, -rel_vel_y, own_vel_x, own_vel_y]
+
+    Where rel = p2 - p1 for player 1's view, and p1 - p2 for player 2's view.
+    This ensures the natural skew-symmetry: swapping players negates the
+    relative terms.
+
+    All outputs are normalized to ~[-1, 1]:
+        rel_pos  -> / boundary_size   (max relative distance)
+        rel_vel  -> / (2 * max_velocity)  (max relative speed)
+        own_vel  -> / max_velocity
+    """
+    # Extract absolute features
+    p1_pos = obs[..., 0:2]
+    p1_vel = obs[..., 2:4]
+    p2_pos = obs[..., 6:8]
+    p2_vel = obs[..., 8:10]
+
+    # Relative features (from p1's perspective)
+    rel_pos = p2_pos - p1_pos    # relative position
+    rel_vel = p2_vel - p1_vel    # relative velocity
+
+    # Normalize
+    rel_pos_norm = rel_pos / boundary_size          # max relative dist = boundary_size
+    rel_vel_norm = rel_vel / (2.0 * max_velocity)   # max relative speed = 2 * max_vel
+    p1_vel_norm = p1_vel / max_velocity
+    p2_vel_norm = p2_vel / max_velocity
+
+    # Assemble: player 1 view and player 2 view
+    p1_view = jnp.concatenate([rel_pos_norm, rel_vel_norm, p1_vel_norm], axis=-1)
+    p2_view = jnp.concatenate([-rel_pos_norm, -rel_vel_norm, p2_vel_norm], axis=-1)
+
+    return jnp.concatenate([p1_view, p2_view], axis=-1)
+
+
+def load_buffer_data(data_dir: str, batch_size: int, normalize: bool = True,
+                     boundary_size: float = 10.0, max_velocity: float = 12.0):
     """Load self-play data from saved buffer.
 
     Args:
         data_dir: Directory containing buffer_state.pkl and metadata.pkl
+        normalize: If True, convert absolute obs to normalized relative obs
+        boundary_size: Environment boundary size (for normalization)
+        max_velocity: Approximate max velocity (for normalization)
 
     Returns:
         Tuple of (buffer, buffer_state, metadata)
@@ -48,6 +98,18 @@ def load_buffer_data(data_dir: str, batch_size: int):
     with open(data_path / "buffer_state.pkl", 'rb') as f:
         buffer_state = pickle.load(f)
 
+    # Convert to relative + normalized observations
+    if normalize:
+        print(f"\nConverting to relative observations "
+              f"(boundary_size={boundary_size}, max_velocity={max_velocity})...")
+        exp = buffer_state.experience
+        rel_obs = _abs_to_relative(exp['observation'], boundary_size, max_velocity)
+        rel_next = _abs_to_relative(exp['next_observation'], boundary_size, max_velocity)
+        new_exp = {**exp, 'observation': rel_obs, 'next_observation': rel_next}
+        buffer_state = buffer_state.replace(experience=new_exp)
+        print("  Layout per player: [rel_pos_x, rel_pos_y, rel_vel_x, rel_vel_y, own_vel_x, own_vel_y]")
+        print("  All features normalized to ~[-1, 1]")
+
     # Recreate buffer with same configuration
     estimated_size = metadata['total_transitions']
 
@@ -68,7 +130,7 @@ def load_buffer_data(data_dir: str, batch_size: int):
         add_batches=False,
     )
 
-    print("✅ Data loaded successfully!")
+    print("Data loaded successfully!")
 
     return buffer, buffer_state, metadata
 
@@ -78,23 +140,18 @@ class LSTQD:
     """
     Run Least squares TD learning
     """
-    def __init__(self, basis: List[Callable], num_actions: int) -> None:
+    def __init__(self, basis: List[Callable], num_actions: int, gamma: float = 0.99) -> None:
 
         self.basis = basis
         self.m = len(basis)
         self.A = num_actions
+        self.gamma = gamma
 
         key = jax.random.key(0) # Using 0 as the seed
 
         self.w = jax.random.uniform(key, shape=(self.m**2,))
-    
-    def act(self, p1_obs, p2_obs, p1_acts: List[jax.Array], p2_acts: List[jax.Array], C):
-        """
-        Take action based on current value function
-        """
-        #p1_B = self.basis_eval(p1_obs)
-        #p2_B = self.basis_eval(p2_obs)
-        # Now add all possible actions 
+
+    def get_f_xy(self, p1_obs, p2_obs, p1_acts, p2_acts, C):
         f_xy = jnp.zeros((self.A, self.A))
         p1_acts = jnp.expand_dims(jnp.array(p1_acts), 1)
         p2_acts = jnp.expand_dims(jnp.array(p2_acts), 1)
@@ -108,8 +165,18 @@ class LSTQD:
         # now vectorize over i,j
         get_f_xy_vmap = jax.vmap(jax.vmap(get_f_xy, in_axes=(None, None, 0, None, None)), in_axes=(None, None, None, 0, None))
         f_xy = get_f_xy_vmap(p1_obs, p2_obs, p1_acts, p2_acts, C)
+        return f_xy
 
+    def act(self, p1_obs, p2_obs, p1_acts: List[jax.Array], p2_acts: List[jax.Array], C):
+        """
+        Take action based on current value function
+        """
+        #p1_B = self.basis_eval(p1_obs)
+        #p2_B = self.basis_eval(p2_obs)
+        # Now add all possible actions 
         #f_xy = p1_B @ C @ p2_B.T
+        f_xy = self.get_f_xy(p1_obs, p2_obs, p1_acts, p2_acts, C)
+
         # Solve Nash eq
         game = nash.Game(f_xy)
         play_counts_generator = game.fictitious_play(iterations=10)
@@ -218,17 +285,20 @@ class LSTQD:
             p1_next_obs = jnp.concatenate((p1_next_obs, next_act[:,0]), axis=1)
             p2_next_obs = jnp.concatenate((p2_next_obs, next_act[:, 1]), axis=1)
 
-            B_xy = self.get_players_B(p1_obs, p2_obs) # m x |S||A|
-            B_yx = self.get_players_B(p2_obs, p1_obs) # m x |S||A|
-            B_next_xy = self.get_players_B(p1_next_obs, p2_next_obs)
-            B_next_yx = self.get_players_B(p2_next_obs, p1_next_obs)
-            
-            A_ = B_xy @ (B_xy - 0.99*B_next_xy).T
+            # Mask for non-terminal transitions
+            not_done = jnp.expand_dims(1.0 - done, 0)  # (1, N)
+
+            B_xy = self.get_players_B(p1_obs, p2_obs) # m² x N
+            B_yx = self.get_players_B(p2_obs, p1_obs) # m² x N
+            B_next_xy = self.get_players_B(p1_next_obs, p2_next_obs) * not_done
+            B_next_yx = self.get_players_B(p2_next_obs, p1_next_obs) * not_done
+
+            A_ = B_xy @ (B_xy - self.gamma*B_next_xy).T
             b_ = B_xy @ reward[:,:1]
             A += A_
             b += b_
 
-            A_ = B_yx @ (B_yx - 0.99*B_next_yx).T
+            A_ = B_yx @ (B_yx - self.gamma*B_next_yx).T
             b_ = B_yx @ -reward[:,:1]
 
             A += A_
@@ -237,13 +307,19 @@ class LSTQD:
 
         A /= M
         b /= M
-        
+
         C = jnp.linalg.pinv(A) @ b
         C = C.reshape((self.m , self.m))
+        # Enforce skew-symmetry
+        C = (C - C.T) / 2
 
         return C
     
-    def fit_Q(self, q_parms, buffer, buffer_state, batch_size, num_samples, seed, tranform_action: Callable = lambda x: x):
+    def fit_minimaxQ(self, checkpoint_path: str, buffer, buffer_state, batch_size, num_samples, seed, tranform_action: Callable = lambda x: x):
+        """
+        Assuming that we are trying to fit a Q function that is of the form Q(s, *, *)
+        """
+        q_network, params, config = load_checkpoint(checkpoint_path)
 
         # Create random key
         key = jax.random.PRNGKey(seed)
@@ -253,8 +329,9 @@ class LSTQD:
 
         tds = []
         for iter_ in tqdm(range(num_samples)):
+            key, subkey = jax.random.split(key)
             # Note: Flashbax item buffer samples are in 'experience' field
-            batch = buffer.sample(buffer_state, key)
+            batch = buffer.sample(buffer_state, subkey)
 
             experience = batch.experience
 
@@ -266,18 +343,21 @@ class LSTQD:
             next_obs = experience['next_observation']
             p1_next_obs, p2_next_obs = self.get_p_obs(next_obs)
             dones = experience['done']
-           
-            B_xy = self.get_players_B(p1_obs, p2_obs) # m x |S||A|
-            B_yx = self.get_players_B(p2_obs, p1_obs) # m x |S||A|
-            B_next_xy = self.get_players_B(p1_next_obs, p2_next_obs)
-            B_next_yx = self.get_players_B(p2_next_obs, p1_next_obs)
-            
-            A_ = B_xy @ (B_xy - 0.99*B_next_xy).T
+
+            # Mask for non-terminal transitions
+            not_done = jnp.expand_dims(1.0 - dones, 0)  # (1, N)
+
+            B_xy = self.get_players_B(p1_obs, p2_obs) # m² x N
+            B_yx = self.get_players_B(p2_obs, p1_obs) # m² x N
+            B_next_xy = self.get_players_B(p1_next_obs, p2_next_obs) * not_done
+            B_next_yx = self.get_players_B(p2_next_obs, p1_next_obs) * not_done
+
+            A_ = B_xy @ (B_xy - self.gamma*B_next_xy).T
             b_ = B_xy @ rewards
             A += A_
             b += b_
 
-            A_ = B_yx @ (B_yx - 0.99*B_next_yx).T
+            A_ = B_yx @ (B_yx - self.gamma*B_next_yx).T
             b_ = B_yx @ -rewards
 
             A += A_
@@ -291,31 +371,35 @@ class LSTQD:
             B_y = self.basis_eval(p2_obs)
             B_next_x = self.basis_eval(p1_next_obs)
             B_next_y = self.basis_eval(p2_next_obs)
-            pred_ = (B_x @ C.reshape((self.m, self.m)) @ B_y.T).mean(axis=1)
-            pred_next_ = (B_next_x @ C.reshape((self.m, self.m)) @ B_next_y.T).mean(axis=1)
+            C_mat = C.reshape((self.m, self.m))
+            pred_ = jnp.sum(B_x @ C_mat * B_y, axis=1)
+            pred_next_ = jnp.sum(B_next_x @ C_mat * B_next_y, axis=1) * (1.0 - dones)
 
             # TD Error
-            td_error = (pred_ - (rewards.flatten() + pred_next_)).mean() 
+            td_error = (pred_ - (rewards.flatten() + self.gamma * pred_next_)).mean()
             tds.append(td_error)
 
 
         A /= M
         b /= M
-        
+
         print("----A---")
         print(tabulate(A))
         print("----b----")
         print(tabulate(b))
 
-        C = jnp.linalg.inv(A) @ b
+        C = jnp.linalg.pinv(A) @ b
         C = C.reshape((self.m , self.m))
-        
+        C_raw = C
+        # Enforce skew-symmetry
+        C = (C - C.T) / 2
+
         print("-----C----")
         print(tabulate(C))
 
-        return C, tds
+        return C, tds, C_raw
 
-    def fit(self, buffer, buffer_state, batch_size, num_samples, seed, tranform_action: Callable = lambda x: x):
+    def fit(self, buffer, buffer_state, batch_size, num_samples, seed, tranform_action: Callable = lambda x: x, verbose: bool = True):
 
         # Create random key
         key = jax.random.PRNGKey(seed)
@@ -325,8 +409,9 @@ class LSTQD:
 
         tds = []
         for iter_ in tqdm(range(num_samples)):
+            key, subkey = jax.random.split(key)
             # Note: Flashbax item buffer samples are in 'experience' field
-            batch = buffer.sample(buffer_state, key)
+            batch = buffer.sample(buffer_state, subkey)
 
             experience = batch.experience
 
@@ -338,18 +423,21 @@ class LSTQD:
             next_obs = experience['next_observation']
             p1_next_obs, p2_next_obs = self.get_p_obs(next_obs)
             dones = experience['done']
-           
-            B_xy = self.get_players_B(p1_obs, p2_obs) # m x |S||A|
-            B_yx = self.get_players_B(p2_obs, p1_obs) # m x |S||A|
-            B_next_xy = self.get_players_B(p1_next_obs, p2_next_obs)
-            B_next_yx = self.get_players_B(p2_next_obs, p1_next_obs)
-            
-            A_ = B_xy @ (B_xy - 0.99*B_next_xy).T
+
+            # Mask for non-terminal transitions: zero out next-state basis at terminal steps
+            not_done = jnp.expand_dims(1.0 - dones, 0)  # (1, N) for broadcasting with (m², N)
+
+            B_xy = self.get_players_B(p1_obs, p2_obs) # m² x N
+            B_yx = self.get_players_B(p2_obs, p1_obs) # m² x N
+            B_next_xy = self.get_players_B(p1_next_obs, p2_next_obs) * not_done
+            B_next_yx = self.get_players_B(p2_next_obs, p1_next_obs) * not_done
+
+            A_ = B_xy @ (B_xy - self.gamma*B_next_xy).T
             b_ = B_xy @ rewards
             A += A_
             b += b_
 
-            A_ = B_yx @ (B_yx - 0.99*B_next_yx).T
+            A_ = B_yx @ (B_yx - self.gamma*B_next_yx).T
             b_ = B_yx @ -rewards
 
             A += A_
@@ -363,29 +451,35 @@ class LSTQD:
             B_y = self.basis_eval(p2_obs)
             B_next_x = self.basis_eval(p1_next_obs)
             B_next_y = self.basis_eval(p2_next_obs)
-            pred_ = (B_x @ C.reshape((self.m, self.m)) @ B_y.T).mean(axis=1)
-            pred_next_ = (B_next_x @ C.reshape((self.m, self.m)) @ B_next_y.T).mean(axis=1)
+            C_mat = C.reshape((self.m, self.m))
+            pred_ = jnp.sum(B_x @ C_mat * B_y, axis=1)
+            pred_next_ = jnp.sum(B_next_x @ C_mat * B_next_y, axis=1) * (1.0 - dones)
 
             # TD Error
-            td_error = (pred_ - (rewards.flatten() + pred_next_)).mean() 
+            td_error = (pred_ - (rewards.flatten() + self.gamma * pred_next_)).mean()
             tds.append(td_error)
 
 
         A /= M
         b /= M
-        
-        print("----A---")
-        print(tabulate(A))
-        print("----b----")
-        print(tabulate(b))
 
-        C = jnp.linalg.inv(A) @ b
+        if verbose:
+            print("----A---")
+            print(tabulate(A))
+            print("----b----")
+            print(tabulate(b))
+
+        C = jnp.linalg.pinv(A) @ b
         C = C.reshape((self.m , self.m))
-        
-        print("-----C----")
-        print(tabulate(C))
+        C_raw = C
+        # Enforce skew-symmetry
+        C = (C - C.T) / 2
 
-        return C, tds
+        if verbose:
+            print("-----C----")
+            print(tabulate(C))
+
+        return C, tds, C_raw
 
 
 

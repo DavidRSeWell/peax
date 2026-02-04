@@ -221,6 +221,20 @@ def get_global_state(env_state, env: PursuerEvaderEnv) -> np.ndarray:
         np.array([env_state.time / env.params.max_steps])         # Already in [0, 1]
     ])
 
+def get_players_obs_from_global(global_state: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Extract individual agent observations from global state.
+
+    Args:
+        global_state: Global state vector [pursuer_pos(2), pursuer_vel(2), evader_pos(2), evader_vel(2), time(1)]
+
+    Returns:
+        Tuple of individual observations for pursuer and evader
+    """
+    pursuer_obs = global_state[:4]
+    pursuer_obs = jnp.concatenate([pursuer_obs, global_state[8:9], jnp.array([0])])  # Append time and ID
+    evader_obs = global_state[4:8]
+    evader_obs = jnp.concatenate([evader_obs, global_state[8:9], jnp.array([1])])  # Append time and ID
+    return pursuer_obs, evader_obs
 
 def discretize_action(action_idx: int, num_actions_per_dim: int, max_force: float) -> jnp.ndarray:
     """Convert discrete action index to continuous force."""
